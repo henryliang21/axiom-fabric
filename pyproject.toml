@@ -8,7 +8,7 @@ version = "0.0.1"
 description = "The Versioned Truth Layer for Agentic AI."
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "Apache-2.0" }
+license = { text = "MIT" }
 authors = [{ name = "adaptivemake" }]
 dependencies = [
     "sqlalchemy>=2.0,<3.0",
