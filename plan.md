@@ -17,11 +17,12 @@ This plan maps the loop onto the wider Truth Glue Framework described in `brief.
 Resolved:
 
 - **Implementation language.** Python only for v1 (targeting `>=3.12`, running on 3.14). Java SDKs deferred until a latency target is named.
-- **Storage backend.** Postgres (Postgres.app locally at `postgres@localhost:5432/henryliang`, no password). Move to a Postgres docker for shared/CI use later.
+- **Storage backend.** Postgres as the production default (Postgres.app locally at `postgres@localhost:5432/henryliang`, no password). Move to a Postgres docker for shared/CI use later. **SQLite is a supported second backend** for local dev (file-backed) and tests / ephemeral agents (`:memory:`); selected via `AF_DATABASE_URL`. Schema is dialect-agnostic (`Uuid`, `JSON().with_variant(JSONB, "postgresql")`); SQLite engine uses `StaticPool` for `:memory:` and a `PRAGMA foreign_keys=ON` listener so cascade / restrict FKs are enforced. Phase 4+ queries that lean on JSONB operators remain Postgres-only.
 - **Layer taxonomy.** Three layers ship as defaults — **Canonical**, **Episodic**, **Living** — and users may add or remove layers per project. **Minimum of one layer must exist;** the system refuses to start otherwise.
 - **Layer versioning.** **First-class (Option B).** Each layer carries its own version history via a `layer_versions` table. Facts belong to a specific `(layer, layer_version)` pair, and adding/removing/mutating facts in a layer triggers a new layer version. Cascade invalidation becomes a SQL query: "which higher layer-versions reference this stale lower one?"
 - **Fact content shape.** `content JSONB` plus an optional `schema_ref` column on `facts`. Supports both typed schema-bound records and free-text claims through the same table.
 - **LLM interface scope.** Anthropic SDK and OpenAI SDK both supported in v1, behind a small provider-abstraction seam.
+- **Dynamic / sourced facts.** **Snapshot-on-refresh (Option B)** rather than live-resolve at generation time. A new `FactSource` row (1:1, optional, on `Fact`) carries `kind` (`sql` / `http` / `python` / `mcp_tool`), `uri`, `params`, `refresh_policy` (`on_read` / `ttl` / `manual` / `scheduled`), and `ttl_seconds` / `schedule_cron`. Each refresh writes a new `FactVersion` whose `justification` records fetch provenance (`source`, `fetched_at`, `fresh_until`). Reads, version pinning, cost calculus, and cascade staleness all reuse the existing `FactVersion` path — dynamic and static facts are indistinguishable to consumers. Reproducibility is preserved: pinned generations always see the snapshot value, never a moving target. Out of scope for v1; lands as Phase 4.5 (depends on Phase 1.5 layer-versions + Phase 4 cascade machinery).
 
 ## 3. Guiding principles (carried from brief, sharpened by §1)
 
@@ -31,6 +32,7 @@ Resolved:
 - **Promotion direction.** Default: candidate facts promote into the **next layer up** from the highest layer present in the source generation's context. Callers can override.
 - **Cascade re-evaluation.** When a layer-version is re-created, all higher layer-versions that pinned the prior version are marked **stale**, never silently re-pinned. Resolving a stale layer-version is its own decision, with its own cost.
 - **Branch cost, not point cost.** Cost is summed over the dependency subtree, so the user is choosing where to *alternate* the truth, not just which row to edit.
+- **Snapshots, not live reads.** Dynamic data (DB rows, API responses, crawl output) enters the truth store as snapshotted fact-versions with fetch provenance, never as live resolvers fired at generation time. Reproducibility of a pinned generation is non-negotiable — a generation grounded in `inventory=47` must replay identically tomorrow even if the upstream POS now reads `inventory=12`. Freshness is governed per-fact by `FactSource.refresh_policy`, not by reaching across the boundary mid-prompt.
 
 ## 4. Phased roadmap
 
@@ -91,6 +93,22 @@ Deliverables:
 - CLI: `af cost <change>`, `af stale`, `af reevaluate`.
 
 Exit criteria: changing a canonical fact reports the full branch cost up-front, marks downstream layer-versions stale, and offers a re-evaluation path per stale node.
+
+### Phase 4.5 — Dynamic / sourced facts (FactSource + refresh runner)
+
+Deliverables:
+
+- Schema: new `fact_sources` table (1:1 with `facts`, optional) — `(id, fact_id, kind, uri, params JSONB, refresh_policy, ttl_seconds, schedule_cron, next_refresh_at, last_refreshed_at)`. `kind` ∈ {`sql`, `http`, `python`, `mcp_tool`}. `refresh_policy` ∈ {`on_read`, `ttl`, `manual`, `scheduled`}.
+- `fact_versions.justification` schema extended: in addition to the upstream-derivation links from Phase 1.5, sourced versions carry `{"source": "...", "fetched_at": "...", "fresh_until": "..."}`.
+- Resolver registry: dispatch table mapping `kind` → callable that takes `(uri, params)` and returns a JSON payload + optional log-prob / confidence.
+- Refresh runner: a service-layer function that walks `fact_sources` whose `next_refresh_at ≤ now()` (or whose `refresh_policy='on_read'` is being requested at assembly time), fires the resolver, and writes a new `fact_version` row. Reuses the same atomic write used by `create_layer_version` so a refresh = a layer-version bump in the layer hosting the sourced fact.
+- Cascade staleness generalizes: refreshing a sourced fact-version marks higher layer-versions stale via the Phase 4 mechanism — same code path as "canonical layer re-versioned."
+- Default layer addition (proposed, to be confirmed during build): an `observed` (or `live`) layer between Canonical and Episodic, default weight 50. Optional — users can also attach `FactSource` to facts in any other layer.
+- CLI: `af source list`, `af source attach <fact> --kind sql --uri ...`, `af source refresh <fact>`, `af source policy <fact> --ttl 60`.
+
+Exit criteria: a `FactSource` of each kind can be attached, refreshed manually + on TTL, produces a new fact-version with fetch provenance in `justification`, and triggers downstream staleness through the same machinery as re-versioning. Re-running a generation pinned to an old fact-version reproduces the exact value seen at original generation time.
+
+Storage caveat: lands Postgres-only at first. SQLite can store sourced fact-versions, but the Phase 4 staleness queries that drive cascade re-evaluation rely on JSONB operators against `justification`.
 
 ### Phase 5 — MCP interface (brief's Priority 1)
 
@@ -154,6 +172,7 @@ Exit criteria: an auditor can reconstruct *why* any given fact-version or layer-
 - UI — CLI and MCP only.
 - Cross-project fact federation.
 - Automatic cascade re-evaluation (Phase 4); v1 only flags staleness, doesn't act on it.
+- Dynamic / sourced facts (Phase 4.5); v1 facts are statically authored only, via DSL or direct seeding.
 
 ## 6. Next concrete tasks (Phase 1 done → Phase 1.5)
 

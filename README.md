@@ -46,11 +46,11 @@ Old versions are never overwritten — every truth change is an append.
 
 Three layers ship out of the box (users may add or remove their own per project, minimum of one required):
 
-| Layer       | Default weight | Purpose                                                         |
-| ----------- | -------------- | --------------------------------------------------------------- |
-| `canonical` | 90             | Immutable laws — physics of the system, schema invariants.      |
-| `episodic`  | 30             | Interaction history — every prompt/response logged here.        |
-| `living`    | 10             | LLM-generated facts — candidates that *may* become future truth. |
+| Layer       | Default weight | Purpose                                                          |
+| ----------- | -------------- | ---------------------------------------------------------------- |
+| `canonical` | 90             | Immutable laws - physics of the system, schema invariants.       |
+| `episodic`  | 30             | Interaction history - every prompt/response logged here.         |
+| `living`    | 10             | LLM-generated facts - candidates that may become future truth.   |
 
 Higher weight = higher gravity = more expensive to overturn.
 
@@ -61,6 +61,21 @@ Higher weight = higher gravity = more expensive to overturn.
 3. **Promote (selective).** Chosen outputs become candidate facts in the **next layer up** from the highest layer present in the source generation. The new fact's `justification` records the exact upstream layer-versions and fact-versions it was derived from.
 4. **Re-version.** When a foundational layer is re-created, every higher layer-version that pinned the prior version is marked **stale** — never silently re-pinned. Re-evaluation is a deliberate, cost-priced act.
 5. **Cost.** `Σ (weight × depth × temperature)` over the dependency *subtree* — so the caller is choosing where to alternate the truth, not just which row to edit.
+
+### Dynamic / sourced facts (planned)
+
+The model above is static — every `FactVersion` is a frozen JSON snapshot, written once. But applications routinely need to ground LLM calls on values that change between calls: inventory levels, customer status, the latest scraped page, today's weather, a row from a transactional database. The chosen design for this is **snapshot-on-refresh**, not live-resolve at generation time.
+
+Resolving live would break the reproducibility guarantee — replaying yesterday's prompt with today's inventory would produce a different answer with no audit trail of what the model actually saw. Snapshotting keeps every generation pinned to an exact, recoverable view of the world.
+
+The schema extension is additive:
+
+- A new `FactSource` row (1:1, optional, attached to `Fact`) carries the source `kind` (`sql` / `http` / `python` / `mcp_tool`), the connection URI, params, and a refresh policy (`on_read` / `ttl` / `manual` / `scheduled`) with `ttl_seconds` or `schedule_cron`.
+- Each refresh writes a new `FactVersion` whose `justification` records fetch provenance — `source`, `fetched_at`, `fresh_until` — instead of (or alongside) the upstream-derivation links that static facts carry.
+- Reads, version pinning, cost calculus, and cascade-staleness mechanics all reuse the existing `FactVersion` path. Dynamic and static facts are indistinguishable to consumers.
+- MCP becomes a natural ingress: external MCP tools (`inventory.get(sku)`, `weather.now(city)`) are valid `FactSource.kind`s, so the planned MCP server work and the dynamic-facts work reinforce each other — the truth store consumes MCP for sourcing *and* exposes MCP for reading.
+
+Refresh-driven snapshots land after first-class layer versions and the cascade-staleness mechanics, since "this sourced fact just got refreshed" propagates downstream staleness through the same machinery as "this canonical layer got re-versioned."
 
 ## Architecture
 
@@ -165,7 +180,9 @@ A terminal UI for exploring layer history, inspecting fact lineage, and previewi
 - **DONE:** Core truth store on Postgres — `Layer` / `Fact` / `FactVersion` schema, `af init`, `af layer list`.
 - **DONE:** SQLite supported as a second backend — in-memory and file modes, FK enforcement, dialect-agnostic JSON / UUID columns.
 - **Next:** First-class layer versions — `layer_versions` table, history CLI, cascade-staleness mechanics.
-- **Later:** Context assembly + LLM call, write-back loop with gated promotion, branch-cost + cascade re-evaluation, MCP server, dependency-directed backtracking, declarative agent blueprints, constrained decoding, durable execution, human-in-the-loop governance.
+- **Later — core loop:** Context assembly + LLM call, write-back loop with gated promotion, branch-cost + cascade re-evaluation, MCP server.
+- **Later — sourced facts:** `FactSource` extension for dynamic data (SQL / HTTP / Python / MCP-tool), snapshot-on-refresh with TTL / cron / on-read policies, fetch provenance recorded in `justification`.
+- **Later — beyond:** Dependency-directed backtracking, declarative agent blueprints, constrained decoding, durable execution, human-in-the-loop governance.
 
 Treat anything beyond what's marked DONE as design-in-flight — the code is the authoritative source for what actually exists today.
 
