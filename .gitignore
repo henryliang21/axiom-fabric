@@ -20,6 +20,11 @@ htmlcov/
 .env.local
 .env.*.local
 
+# Local databases (default SQLite backend)
+*.db
+*.sqlite
+*.sqlite3
+
 .DS_Store
 .idea/
 .vscode/
