@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-Phase 1 of `plan.md` is complete. Source lives at `src/axiom_fabric/` (Python 3.12+, SQLAlchemy 2.0 + Alembic, Typer CLI named `af`). Schema is dialect-agnostic across SQLite (default, `sqlite:///./af.db`) and Postgres (opt-in via `AF_DATABASE_URL=postgresql+psycopg://...`). Current schema covers `layers`, `facts`, `fact_versions`; Phase 1.5 (first-class layer-versions + a `fact_version_edges` adjacency table) is the next slice.
+Phase 1 of `plan.md` is complete. The repo is a `uv` workspace of two packages: **`axiom-fabric/`** — the core (Python 3.12+, SQLAlchemy 2.0 + Alembic, Typer CLI named `af`) under `axiom-fabric/src/axiom_fabric/` — and **`axiom-fabric-dashboard/`** — the web UI, which depends on the core and reuses its repository functions (scaffold only so far). The workspace root holds shared `ruff`/`pytest` config; each package has its own `pyproject.toml` and ships as a separate wheel. Schema is dialect-agnostic across SQLite (default, `sqlite:///./af.db`) and Postgres (opt-in via `AF_DATABASE_URL=postgresql+psycopg://...`). Current schema covers `layers`, `facts`, `fact_versions`; Phase 1.5 (first-class layer-versions + a `fact_version_edges` adjacency table) is the next slice.
 
 See `plan.md` for the phased roadmap, `brief.md` for the design vision, and `build.md` for how to run it locally.
 

@@ -2,7 +2,7 @@
 
 How to get **Axiom Fabric** (`af`) running locally on **macOS** and **Windows**.
 
-Axiom Fabric is a Python 3.12+ package (`src/axiom_fabric/`) built with `hatchling`, dependency-managed by `uv`, persisted via SQLAlchemy + Alembic, and exposed as a Typer CLI named `af`. There is no compile step — "build" here means: set up the toolchain, install dependencies, point at a database, run migrations, and invoke the CLI.
+Axiom Fabric is a `uv` workspace of two Python 3.12+ packages: **`axiom-fabric/`** (the core data model — SQLAlchemy + Alembic — plus the Typer CLI named `af`) and **`axiom-fabric-dashboard/`** (the optional web UI, which depends on the core). Both build with `hatchling` and are dependency-managed by `uv`. There is no compile step — "build" here means: set up the toolchain, install dependencies, point at a database, run migrations, and invoke the CLI.
 
 See [`README.md`](./README.md) for what the project does and [`pyproject.toml`](./pyproject.toml) for the authoritative dependency list.
 
@@ -43,9 +43,9 @@ cd axiom-fabric
 # Editable install with dev + optional LLM extras, into .venv/
 uv sync --all-extras
 
-# Equivalent without uv:
+# Equivalent without uv (installs the core package only):
 # python3.12 -m venv .venv && source .venv/bin/activate
-# pip install -e '.[dev,llm]'
+# pip install -e './axiom-fabric[dev,llm]'
 ```
 
 ### 3. Pick a backend
@@ -112,10 +112,10 @@ Set-Location axiom-fabric
 # Editable install with dev + optional LLM extras, into .venv\
 uv sync --all-extras
 
-# Equivalent without uv:
+# Equivalent without uv (installs the core package only):
 # py -3.12 -m venv .venv
 # .\.venv\Scripts\Activate.ps1
-# pip install -e ".[dev,llm]"
+# pip install -e "./axiom-fabric[dev,llm]"
 ```
 
 If `Activate.ps1` is blocked by execution policy, run once per shell:
@@ -160,7 +160,7 @@ uv run af layer list     # should print: canonical, episodic, living
 
 ## Viewing the data structure
 
-The schema is five tables (defined in `src/axiom_fabric/models.py`):
+The schema is five tables (defined in `axiom-fabric/src/axiom_fabric/models.py`):
 
 | Table                | Purpose                                                  | Key columns                                                                      |
 | -------------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------- |
@@ -196,7 +196,7 @@ Backend-specific tools work too:
 
 Setting `AF_DATABASE_URL` in the shell only lasts for that session. Two durable options:
 
-- **`.env` file in the repo root** — already supported by `pydantic-settings` (see `src/axiom_fabric/config.py`). `.env` is gitignored.
+- **`.env` file in the directory you run `af` from** — already supported by `pydantic-settings` (see `axiom-fabric/src/axiom_fabric/config.py`). `.env` is gitignored.
 
   ```
   AF_DATABASE_URL=sqlite:///./af.db
@@ -231,12 +231,13 @@ uv run pytest
 uv run ruff check .
 uv run ruff format .
 
-# Alembic (raw, if you need to author a migration)
+# Alembic (raw, if you need to author a migration) — run from the core package dir
+cd axiom-fabric
 uv run alembic -c alembic.ini revision --autogenerate -m "msg"
 uv run alembic -c alembic.ini upgrade head
 ```
 
-The CLI entry point is registered in `pyproject.toml` (`af = "axiom_fabric.cli:app"`); after `uv sync` you can also call `uv run af --help` for the full command surface.
+The CLI entry point is registered in `axiom-fabric/pyproject.toml` (`af = "axiom_fabric.cli:app"`); after `uv sync` you can also call `uv run af --help` from the workspace root for the full command surface.
 
 ---
 

@@ -146,21 +146,32 @@ For production or multi-process use, point `AF_DATABASE_URL` at a Postgres insta
 
 On Postgres, `content` and `justification` use `JSONB`; the rest of the schema is identical across both backends.
 
-### Module layout
+### Repository layout
+
+The repo is a `uv` workspace with two independently publishable packages:
 
 ```text
-src/axiom_fabric/
-├── __init__.py        # package metadata
-├── cli.py             # `af` CLI (Typer) — presentation layer only
-├── config.py          # AF_DATABASE_URL + Settings (pydantic-settings)
-├── db.py              # Engine, sessionmaker, session_scope context manager
-├── layers.py          # Repository functions over Layer (pure, Session-taking)
-├── migrate.py         # Programmatic Alembic upgrade / downgrade
-├── models.py          # SQLAlchemy 2.0 ORM models — Layer / Fact / FactVersion
-└── migrations/        # Alembic migrations (dialect-agnostic)
+axiom-fabric-internal/                 # workspace root (shared ruff/pytest config)
+├── pyproject.toml                     # [tool.uv.workspace] members
+├── axiom-fabric/                      # ── package: axiom-fabric (core + cli + mcp) ──
+│   ├── pyproject.toml                 #    the only thing `pip install axiom-fabric` pulls in
+│   ├── alembic.ini
+│   ├── tests/
+│   └── src/axiom_fabric/
+│       ├── cli.py             # `af` CLI (Typer) — presentation layer only
+│       ├── config.py          # AF_DATABASE_URL + Settings (pydantic-settings)
+│       ├── db.py              # Engine, sessionmaker, session_scope context manager
+│       ├── layers.py          # Repository functions over Layer / LayerVersion
+│       ├── facts.py           # Repository functions over Fact / FactVersion / edges
+│       ├── migrate.py         # Programmatic Alembic upgrade / downgrade
+│       ├── models.py          # SQLAlchemy 2.0 ORM models
+│       └── migrations/        # Alembic migrations (dialect-agnostic)
+└── axiom-fabric-dashboard/            # ── package: axiom-fabric-dashboard (web UI) ──
+    ├── pyproject.toml                 #    depends on axiom-fabric; published separately
+    └── src/axiom_fabric_dashboard/    #    never included in the core wheel
 ```
 
-The core invariant: **CLI / TUI / MCP frontends are presentation layers**. They never construct SQL or hold a `Session` longer than a request. All data access goes through repository functions in `layers.py` (and forthcoming `facts.py`, `services/...`). This is what keeps the door open for alternative backends or a DTO boundary without locking us into a premature abstraction today.
+The core invariant: **CLI / dashboard / MCP frontends are presentation layers**. They never construct SQL or hold a `Session` longer than a request. All data access goes through repository functions in `layers.py` / `facts.py`. The dashboard package imports `axiom_fabric` and reuses those same functions — it adds no data-access logic of its own. This is what lets the core ship to PyPI on its own and keeps the door open for alternative frontends without a premature abstraction.
 
 ## Integration points
 
@@ -233,7 +244,7 @@ Treat anything beyond what's marked DONE as design-in-flight — the code is the
 
 ```bash
 # Install (editable, with dev + optional LLM extras)
-uv sync                                  # or: pip install -e '.[dev,llm]'
+uv sync --all-extras                     # or: pip install -e './axiom-fabric[dev,llm]'
 
 # Pick a backend
 export AF_DATABASE_URL='sqlite:///./af.db'   # zero-setup local
