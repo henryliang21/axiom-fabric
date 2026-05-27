@@ -97,11 +97,54 @@ SQLite specifics handled by the engine layer:
 - `PRAGMA foreign_keys=ON` is enforced via a connect-time event listener so the schema's `ON DELETE CASCADE` / `RESTRICT` semantics actually apply.
 - No new dependency — `sqlite3` is in Python's stdlib.
 
-Default `AF_DATABASE_URL` is `postgresql+psycopg://postgres@localhost:5432/henryliang`. Override per environment:
+Default `AF_DATABASE_URL` is `sqlite:///./af.db` — a file-backed SQLite database created in the working directory on first `af init`, so the tool works with zero infrastructure out of the box. Override per environment to point at any supported backend:
 
 ```bash
-export AF_DATABASE_URL='sqlite:///./af.db'
+export AF_DATABASE_URL='sqlite:///:memory:'   # ephemeral, e.g. tests
 ```
+
+#### Connecting to PostgreSQL
+
+For production or multi-process use, point `AF_DATABASE_URL` at a Postgres instance. The driver (`psycopg[binary]`) ships prebuilt wheels, so no `libpq` or build tools are required.
+
+1. **Create a database** (once), using whatever credentials your server has:
+
+   ```bash
+   createdb axiom_fabric
+   # or, via psql:  psql -U postgres -c 'CREATE DATABASE axiom_fabric;'
+   ```
+
+2. **Set the URL.** The shape is `postgresql+psycopg://<user>:<password>@<host>:<port>/<dbname>` (omit `:<password>` if your server trusts local connections):
+
+   ```bash
+   # macOS / Linux
+   export AF_DATABASE_URL='postgresql+psycopg://postgres:secret@localhost:5432/axiom_fabric'
+   ```
+
+   ```powershell
+   # Windows PowerShell
+   $env:AF_DATABASE_URL = 'postgresql+psycopg://postgres:secret@localhost:5432/axiom_fabric'
+   ```
+
+   To make it durable rather than per-shell, put it in a `.env` file in the directory you run `af` from (read automatically by `pydantic-settings`, and gitignored). The repo ships a template — copy it and edit:
+
+   ```bash
+   cp .env.example .env          # macOS / Linux  (Windows: Copy-Item .env.example .env)
+   ```
+
+   ```
+   # .env
+   AF_DATABASE_URL=postgresql+psycopg://postgres:secret@localhost:5432/axiom_fabric
+   ```
+
+3. **Migrate + seed** against the new backend — same commands as SQLite:
+
+   ```bash
+   af init           # applies migrations to the Postgres database
+   af layer list     # verify
+   ```
+
+On Postgres, `content` and `justification` use `JSONB`; the rest of the schema is identical across both backends.
 
 ### Module layout
 
