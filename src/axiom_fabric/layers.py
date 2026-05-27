@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from axiom_fabric.models import Layer
+from axiom_fabric.models import Layer, LayerVersion
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,30 @@ def ensure_at_least_one_layer(session: Session) -> None:
         )
 
 
+def ensure_v1_layer_version(session: Session, layer: Layer) -> LayerVersion:
+    """Return the v1 LayerVersion for `layer`, creating it if missing.
+
+    Idempotent — safe to call repeatedly during seeding or re-init.
+    """
+    existing = session.scalar(
+        select(LayerVersion).where(
+            LayerVersion.layer_id == layer.id, LayerVersion.version == 1
+        )
+    )
+    if existing is not None:
+        return existing
+    lv = LayerVersion(
+        layer_id=layer.id,
+        version=1,
+        weight=layer.weight,
+        ordinal=layer.ordinal,
+        notes="Initial snapshot",
+    )
+    session.add(lv)
+    session.flush()
+    return lv
+
+
 def seed_default_layers(session: Session) -> list[Layer]:
     existing_names = {row[0] for row in session.execute(select(Layer.name)).all()}
     created: list[Layer] = []
@@ -54,8 +78,35 @@ def seed_default_layers(session: Session) -> list[Layer]:
         session.add(layer)
         created.append(layer)
     session.flush()
+    # Ensure every layer (new or pre-existing) has a v1 snapshot.
+    for layer in session.execute(select(Layer)).scalars().all():
+        ensure_v1_layer_version(session, layer)
     return created
 
 
 def list_layers(session: Session) -> list[Layer]:
     return list(session.execute(select(Layer).order_by(Layer.ordinal)).scalars().all())
+
+
+def get_layer_by_name(session: Session, name: str) -> Layer | None:
+    return session.scalar(select(Layer).where(Layer.name == name))
+
+
+def list_layer_versions(session: Session, layer: Layer) -> list[LayerVersion]:
+    return list(
+        session.execute(
+            select(LayerVersion)
+            .where(LayerVersion.layer_id == layer.id)
+            .order_by(LayerVersion.version)
+        )
+        .scalars()
+        .all()
+    )
+
+
+def get_layer_version(session: Session, layer: Layer, version: int) -> LayerVersion | None:
+    return session.scalar(
+        select(LayerVersion).where(
+            LayerVersion.layer_id == layer.id, LayerVersion.version == version
+        )
+    )

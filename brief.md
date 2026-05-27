@@ -11,10 +11,14 @@ The Truth Glue Framework addresses the **"Integration Paradox"**: the mismatch b
 *   **Durable Execution:** Every truth-altering decision is backed by an event history to allow for **failure-oblivious recovery** and precise version rollbacks.
 
 ## 3. The Truth Layer Model
-The framework should implement a **Versioned Truth Tree** where each node represents a fact or rule with the following metadata:
+The framework should implement a **Versioned Truth DAG** where each node is a fact-version with the following metadata:
 *   **Layer Weight:** A numerical value (e.g., 0–100) defining the "gravity" of the fact. High weights represent foundational truths (laws of physics), while low weights represent mutable flavor text.
-*   **Justification:** A link to the parent node or evidence (MAEB) that led to this fact’s creation.
+*   **Justification:** A structured set of links to the upstream fact-versions (and optionally MAEB evidence) that led to this fact's creation. Stored both as a JSONB blob (for audit) and projected into a normalized `fact_version_edges` adjacency table (for traversal). Edges are always between specific fact-versions, never between fact identities, and may cross layers freely.
 *   **Temperature Influence:** The confidence level (log-probs) of the LLM during generation, which acts as a multiplier for the "cost" of changing that specific fact later.
+
+**Architectural note: layers vs. edges are orthogonal.** Layer assignment governs *policy* — write authority, default weight, promotion target, whether the LLM may mutate the fact. `fact_version_edges` govern *derivation* — which upstream fact-versions a given fact-version was built from. The two never need to align: a Living fact-version directly justified by a Canonical fact-version (skipping Episodic) is the normal case, not the exception.
+
+**The fact-version edge graph is acyclic by construction.** Because writes are append-only and a new fact-version can only cite IDs that already exist at insert time, edges only ever point backward in time. Cycles at the version level are physically impossible — no cycle-detection pass is needed. Apparent cycles at the *fact-identity* level (A.v2 cites B.v1 which cites A.v1) represent mutual refinement across versions, not pathology.
 
 ## 4. Integration Strategy (The 4 Priorities)
 
@@ -36,9 +40,10 @@ Establish an **Authorization Plane** that intercepts LLM proposals before they c
 
 ## 5. Conflict Resolution & Backtracking Logic
 When future task solving becomes impossible, the framework must:
-1.  **Trace Dependencies:** Identify all facts dependent on the current impasse using the **TMS (Truth Maintenance System)**.
+1.  **Trace Dependencies:** Walk the `fact_version_edges` DAG (append-only, acyclic by construction) downstream from the impasse via a recursive CTE — same query text on Postgres and SQLite. The TMS surfaces the affected fact-version set. Layer-version staleness is a derived view: a layer-version is stale iff any fact-version it pins has been invalidated.
 2.  **Calculate Change Cost:** 
     $$\text{Cost} = \sum (\text{Layer Weight} \times \text{Depth} \times \text{Temperature Penalty})$$
+    summed over the descendant subtree in `fact_version_edges`.
 3.  **Evaluate Branching:** Compare the cost of rewriting a high-level "flavor" fact vs. a mid-level "structural" fact.
 4.  **Execute Rollback:** Use **Temporal.io** to revert the workflow state to the chosen version and re-prompt the LLM with the revised truth.
 
