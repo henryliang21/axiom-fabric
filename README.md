@@ -179,22 +179,24 @@ The core invariant: **CLI / dashboard / MCP frontends are presentation layers**.
 
 Installed as `af` (Typer-based). Commands are grouped by noun (`layer`, `fact`); `init` is the only top-level verb. Every write resolves the database the same way as everything else in the system — `AF_DATABASE_URL` or `./af.db` in the working directory.
 
-#### Initialization
+#### Initialization & diagnostics
 
-| Command                  | What it does                                                       |
-| ------------------------ | ------------------------------------------------------------------ |
-| `af init`                | Apply migrations and seed the three default layers (idempotent).   |
-| `af init --skip-seed`    | Migrations only — leave layers empty (for fully custom hierarchies). |
+| Command                  | What it does                                                                                  |
+| ------------------------ | --------------------------------------------------------------------------------------------- |
+| `af init`                | Apply migrations and seed the three default layers (idempotent).                              |
+| `af init --skip-seed`    | Migrations only — leave layers empty (for fully custom hierarchies).                          |
+| `af status`              | Show DB URL, schema revision, and row counts (layers, fact-versions, edges). Reports `not migrated` instead of crashing if `af init` hasn't run. |
 
 #### Layers
 
-| Command                              | What it does                                                       |
-| ------------------------------------ | ------------------------------------------------------------------ |
-| `af layer list`                      | All layers, ordered by ordinal (foundational first).               |
-| `af layer history <name>`            | Every layer-version snapshot of `<name>`, oldest first.            |
-| `af layer version <name> <n>`        | One layer-version's metadata + the fact-versions pinned to it.     |
+| Command                                                                            | What it does                                                                       |
+| ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `af layer create --name <slug> --weight 0-100 --ordinal <int> [--display <text>]`  | Add a custom layer + its v1 layer-version. Both `name` and `ordinal` must be unique. |
+| `af layer list`                                                                    | All layers, ordered by ordinal (foundational first).                               |
+| `af layer history <name>`                                                          | Every layer-version snapshot of `<name>`, oldest first.                            |
+| `af layer version <name> <n>`                                                      | One layer-version's metadata + the fact-versions pinned to it.                     |
 
-Layer create / update / retract aren't exposed yet — the default seed covers the common case, and retracting a layer would orphan every fact pinned to it. Planned alongside the Truth Glue DSL.
+`layer update` and `layer retract` aren't exposed yet — both require cascade-staleness mechanics to be safe (changing a layer's weight invalidates every downstream fact-version's effective cost). Planned alongside Phase 1.5 / 2.
 
 #### Facts
 
@@ -203,22 +205,26 @@ The truth ledger is append-only, which dictates the verb set:
 - `create` adds a new fact identity (its v1 fact-version).
 - `update` **appends** a new version to an existing fact — it does not mutate the prior version.
 - `retract` appends a tombstone version (`weight=0`, `content={}`, `note="retracted"`) — the prior versions stay intact for audit.
-- `list` reads; `edges` walks the derivation graph for one fact-version.
+- `list` is the table view; `show` drills into one fact identity; `version` drills into one specific fact-version (full content + edges); `edges` is a focused subset of `version` that prints only the edges.
 
-| Command                                                | Required flags                       | Optional flags                                                                                              |
-| ------------------------------------------------------ | ------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
-| `af fact create`                                       | `--layer <name>`, `--content '<json>'` | `--weight 0-100` (default: layer's weight), `--edges-to <fv-uuid>` (repeatable), `--note <text>`, `--schema-ref <id>` |
-| `af fact update`                                       | `--fact-id <uuid>`, `--content '<json>'` | `--weight 0-100` (default: carry the prior version's weight), `--edges-to <fv-uuid>` (repeatable), `--note <text>`   |
-| `af fact retract`                                      | `--fact-id <uuid>`                   | `--note <text>` (default: `retracted`)                                                                      |
-| `af fact list`                                         | —                                    | `--layer <name>`, `--latest-only` / `--all-versions` (default: latest-only)                                 |
-| `af fact edges <fv-uuid>`                              | positional `<fv-uuid>`               | —                                                                                                           |
+| Command                                                | Required flags                       | Optional flags                                                                                                                                |
+| ------------------------------------------------------ | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `af fact create`                                       | `--layer <name>`, `--content '<json>'` | `--weight 0-100` (default: layer's weight), `--edges-to <fv-uuid>` (repeatable), `--edge-kind <kind>` (default: `derived_from`), `--note <text>`, `--schema-ref <id>` |
+| `af fact update`                                       | `--fact-id <uuid>`, `--content '<json>'` | `--weight 0-100` (default: carry the prior version's weight), `--edges-to <fv-uuid>` (repeatable), `--edge-kind <kind>` (default: `derived_from`), `--note <text>`   |
+| `af fact retract`                                      | `--fact-id <uuid>`                   | `--note <text>` (default: `retracted`)                                                                                                        |
+| `af fact list`                                         | —                                    | `--layer <name>`, `--latest-only` / `--all-versions` (default: latest-only)                                                                   |
+| `af fact show <fact-id>`                               | positional `<fact-id>`               | —                                                                                                                                             |
+| `af fact version <fv-uuid>`                            | positional `<fv-uuid>`               | —                                                                                                                                             |
+| `af fact edges <fv-uuid>`                              | positional `<fv-uuid>`               | —                                                                                                                                             |
 
 Notes on the flag shape:
 
 - **`--content` is always inline JSON** and must parse to a JSON **object** (a dict). Strings, arrays, and scalars are rejected with a clear error. Quote it according to your shell — single quotes on POSIX, escaped double quotes inside double quotes on PowerShell.
 - **`--edges-to` accepts a fact-version UUID** (an `fv-uuid`, not a `fact-id`). Targets must already exist — forward references are rejected at write time, which is the single mechanism preventing cycles in the derivation DAG.
+- **`--edge-kind`** is one of `derived_from` (default), `evidence_of`, `refutes`, `supersedes`. All `--edges-to` UUIDs in a single command share the same kind; for mixed kinds, append multiple versions or split the write.
 - **`--weight`** is bounded `0..100`. On `create` it defaults to the layer's policy weight; on `update` it carries forward from the prior version.
-- **`af fact edges`** is the only `fact` subcommand that takes a positional argument, because it operates on a specific fact-version rather than a fact identity. It prints both outgoing edges (this version was derived from…) and incoming edges (…were derived from this version).
+- **`af fact show`** prints the fact's layer, every version row, and the **full** latest content (no truncation, syntax-highlighted JSON). Use it when the `list` table preview chops things off.
+- **`af fact version`** is the full per-version drill-down: full content + justification JSON, plus both edge directions. `af fact edges` prints only the edge tables (subset of `version`).
 
 #### Worked example
 
@@ -355,7 +361,8 @@ A terminal UI for exploring layer history, inspecting fact lineage, and previewi
 - **DONE:** Core truth store on Postgres — `Layer` / `Fact` / `FactVersion` schema, `af init`, `af layer list`.
 - **DONE:** SQLite supported as a second backend — in-memory and file modes, FK enforcement, dialect-agnostic JSON / UUID columns.
 - **DONE:** Read-only web dashboard (`axiom-fabric-dashboard`) — FastAPI graph API over shared repository functions + a React Flow frontend, served by `af-dashboard`.
-- **DONE:** Fact write CLI — `af fact create / update / retract / list / edges` with cross-layer derivation edges and append-only retraction tombstones.
+- **DONE:** Fact write CLI — `af fact create / update / retract / list / show / version / edges` with cross-layer edges in all four kinds (`derived_from`, `evidence_of`, `refutes`, `supersedes`) and append-only retraction tombstones.
+- **DONE:** Custom layers + diagnostics — `af layer create` for non-default hierarchies; `af status` reports DB URL, schema revision, and row counts.
 - **Next:** First-class layer versions — `layer_versions` table, history CLI, cascade-staleness mechanics.
 - **Later — core loop:** Context assembly + LLM call, write-back loop with gated promotion, branch-cost + cascade re-evaluation, MCP server.
 - **Later — sourced facts:** `FactSource` extension for dynamic data (SQL / HTTP / Python / MCP-tool), snapshot-on-refresh with TTL / cron / on-read policies, fetch provenance recorded in `justification`.

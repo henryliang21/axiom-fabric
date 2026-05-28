@@ -53,6 +53,7 @@ class FactSpec:
     fact_id: uuid.UUID | None = None
     schema_ref: str | None = None
     edges_to: Sequence[uuid.UUID] = field(default_factory=tuple)
+    edge_kind: str = "derived_from"
     justification: dict | None = None
     temperature: float | None = None
     note: str | None = None
@@ -137,6 +138,7 @@ def create_layer_version(
             weight=spec.weight,
             layer_version=layer_version,
             edges_to=spec.edges_to,
+            edge_kind=spec.edge_kind,
             justification=spec.justification,
             temperature=spec.temperature,
             note=spec.note,
@@ -204,6 +206,10 @@ def get_fact(session: Session, fact_id: uuid.UUID) -> Fact | None:
     return session.get(Fact, fact_id)
 
 
+def get_fact_version(session: Session, fv_id: uuid.UUID) -> FactVersion | None:
+    return session.get(FactVersion, fv_id)
+
+
 def append_fact(
     session: Session,
     layer: Layer,
@@ -211,6 +217,7 @@ def append_fact(
     content: dict,
     weight: int,
     edges_to: Sequence[uuid.UUID] = (),
+    edge_kind: str = "derived_from",
     note: str | None = None,
     schema_ref: str | None = None,
 ) -> FactVersion:
@@ -223,6 +230,7 @@ def append_fact(
                 content=content,
                 weight=weight,
                 edges_to=edges_to,
+                edge_kind=edge_kind,
                 note=note,
                 schema_ref=schema_ref,
             )
@@ -238,6 +246,7 @@ def append_fact_version(
     content: dict,
     weight: int,
     edges_to: Sequence[uuid.UUID] = (),
+    edge_kind: str = "derived_from",
     note: str | None = None,
 ) -> FactVersion:
     """Append a new version to `fact`, wrapped in a fresh layer-version of the fact's layer."""
@@ -253,6 +262,7 @@ def append_fact_version(
                 content=content,
                 weight=weight,
                 edges_to=edges_to,
+                edge_kind=edge_kind,
                 note=note,
             )
         ],

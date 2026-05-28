@@ -84,6 +84,46 @@ def seed_default_layers(session: Session) -> list[Layer]:
     return created
 
 
+class LayerAlreadyExistsError(ValueError):
+    """Raised when creating a layer would collide with an existing name or ordinal."""
+
+
+def create_layer(
+    session: Session,
+    *,
+    name: str,
+    weight: int,
+    ordinal: int,
+    display_name: str | None = None,
+) -> Layer:
+    """Create a new Layer and its v1 LayerVersion. Raises if name or ordinal collide.
+
+    The DB has uniqueness constraints on both (layers.name, layers.ordinal); we
+    pre-check here so callers get a typed error instead of a raw IntegrityError.
+    """
+    if not 0 <= weight <= 100:
+        raise ValueError(f"weight must be 0..100, got {weight}")
+
+    if session.scalar(select(Layer).where(Layer.name == name)) is not None:
+        raise LayerAlreadyExistsError(f"layer with name {name!r} already exists")
+    if session.scalar(select(Layer).where(Layer.ordinal == ordinal)) is not None:
+        raise LayerAlreadyExistsError(
+            f"layer with ordinal {ordinal} already exists "
+            "(ordinals must be unique; pick a different position)"
+        )
+
+    layer = Layer(
+        name=name,
+        display_name=display_name,
+        weight=weight,
+        ordinal=ordinal,
+    )
+    session.add(layer)
+    session.flush()
+    ensure_v1_layer_version(session, layer)
+    return layer
+
+
 def list_layers(session: Session) -> list[Layer]:
     return list(session.execute(select(Layer).order_by(Layer.ordinal)).scalars().all())
 
