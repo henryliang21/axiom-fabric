@@ -177,23 +177,95 @@ The core invariant: **CLI / dashboard / MCP frontends are presentation layers**.
 
 ### CLI
 
-Installed as `af` (Typer-based). Currently:
+Installed as `af` (Typer-based). Commands are grouped by noun (`layer`, `fact`); `init` is the only top-level verb. Every write resolves the database the same way as everything else in the system — `AF_DATABASE_URL` or `./af.db` in the working directory.
+
+#### Initialization
+
+| Command                  | What it does                                                       |
+| ------------------------ | ------------------------------------------------------------------ |
+| `af init`                | Apply migrations and seed the three default layers (idempotent).   |
+| `af init --skip-seed`    | Migrations only — leave layers empty (for fully custom hierarchies). |
+
+#### Layers
+
+| Command                              | What it does                                                       |
+| ------------------------------------ | ------------------------------------------------------------------ |
+| `af layer list`                      | All layers, ordered by ordinal (foundational first).               |
+| `af layer history <name>`            | Every layer-version snapshot of `<name>`, oldest first.            |
+| `af layer version <name> <n>`        | One layer-version's metadata + the fact-versions pinned to it.     |
+
+Layer create / update / retract aren't exposed yet — the default seed covers the common case, and retracting a layer would orphan every fact pinned to it. Planned alongside the Truth Glue DSL.
+
+#### Facts
+
+The truth ledger is append-only, which dictates the verb set:
+
+- `create` adds a new fact identity (its v1 fact-version).
+- `update` **appends** a new version to an existing fact — it does not mutate the prior version.
+- `retract` appends a tombstone version (`weight=0`, `content={}`, `note="retracted"`) — the prior versions stay intact for audit.
+- `list` reads; `edges` walks the derivation graph for one fact-version.
+
+| Command                                                | Required flags                       | Optional flags                                                                                              |
+| ------------------------------------------------------ | ------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| `af fact create`                                       | `--layer <name>`, `--content '<json>'` | `--weight 0-100` (default: layer's weight), `--edges-to <fv-uuid>` (repeatable), `--note <text>`, `--schema-ref <id>` |
+| `af fact update`                                       | `--fact-id <uuid>`, `--content '<json>'` | `--weight 0-100` (default: carry the prior version's weight), `--edges-to <fv-uuid>` (repeatable), `--note <text>`   |
+| `af fact retract`                                      | `--fact-id <uuid>`                   | `--note <text>` (default: `retracted`)                                                                      |
+| `af fact list`                                         | —                                    | `--layer <name>`, `--latest-only` / `--all-versions` (default: latest-only)                                 |
+| `af fact edges <fv-uuid>`                              | positional `<fv-uuid>`               | —                                                                                                           |
+
+Notes on the flag shape:
+
+- **`--content` is always inline JSON** and must parse to a JSON **object** (a dict). Strings, arrays, and scalars are rejected with a clear error. Quote it according to your shell — single quotes on POSIX, escaped double quotes inside double quotes on PowerShell.
+- **`--edges-to` accepts a fact-version UUID** (an `fv-uuid`, not a `fact-id`). Targets must already exist — forward references are rejected at write time, which is the single mechanism preventing cycles in the derivation DAG.
+- **`--weight`** is bounded `0..100`. On `create` it defaults to the layer's policy weight; on `update` it carries forward from the prior version.
+- **`af fact edges`** is the only `fact` subcommand that takes a positional argument, because it operates on a specific fact-version rather than a fact identity. It prints both outgoing edges (this version was derived from…) and incoming edges (…were derived from this version).
+
+#### Worked example
 
 ```bash
-af init                 # Run migrations + seed default layers
-af init --skip-seed     # Migrations only
-af layer list           # Show all layers, ordered by ordinal
+af init
+
+# Create a canonical fact and capture its fact-version UUID from the output.
+af fact create \
+    --layer canonical \
+    --content '{"rule": "pricing_tiers", "free": 0, "pro": 10, "enterprise": 100}'
+# -> Created fact d1c... (fv 7017b6be-..., v1, weight=90)
+
+# Episodic fact cites the canonical one (cross-layer derivation edge).
+af fact create \
+    --layer episodic \
+    --content '{"user": "alice", "event": "upgrade", "to": "pro"}' \
+    --edges-to 7017b6be-...
+
+# Append v2 to an existing fact.
+af fact update \
+    --fact-id d1c... \
+    --content '{"rule": "pricing_tiers", "free": 0, "pro": 12, "enterprise": 100}' \
+    --note "Pro tier raised $2"
+
+# Retract a fact (tombstone, not deletion).
+af fact retract --fact-id d1c... --note "Pricing rule rewritten as separate facts"
+
+# Inspect.
+af fact list --all-versions
+af fact edges <fv-uuid>
 ```
 
-Planned:
+A bigger end-to-end demo lives at `scripts/seed_demo_data.sh` — three layers, cross-layer edges, multi-version facts, and one retraction. Run it once for something interesting to view in the dashboard:
 
 ```bash
-af layer history <name>            # Layer-version history
-af layer version <name> <n>        # Inspect a specific layer-version
-af generate --provider anthropic   # LLM call against assembled context
-af promote <candidate>             # Commit a candidate fact into the next layer up
-af cost <change>                   # Branch-cost preview before commit
-af stale / af reevaluate           # Staleness inspection / re-evaluation
+rm -f af.db                         # optional: clean slate
+./scripts/seed_demo_data.sh
+uv run af-dashboard                 # http://localhost:7373
+```
+
+#### Planned
+
+```bash
+af generate --provider anthropic    # LLM call against assembled context
+af promote <candidate>              # Commit a candidate fact into the next layer up
+af cost <change>                    # Branch-cost preview before commit
+af stale / af reevaluate            # Staleness inspection / re-evaluation
 ```
 
 ### Python API
@@ -218,12 +290,50 @@ A curated public re-export surface (`axiom_fabric.__init__`) will land alongside
 
 A local, read-only web UI (the separate `axiom-fabric-dashboard` package) for exploring the truth store: facts grouped into layers, connected by their fact-version edges, with a stacked-card affordance for multi-version facts and a side panel showing version history and per-version lineage.
 
+It's a FastAPI backend — a thin presentation layer over the same `axiom_fabric` repository functions (`load_graph`, `edges_for`), *not* a second data API — plus a Vite/React/React Flow frontend shipped prebuilt in the wheel. It resolves the database the same way the `af` CLI does (`AF_DATABASE_URL` or `./af.db` in the current directory). Read-only today; write actions become additive once the core's write APIs land.
+
+#### Run from an installed package
+
 ```bash
 pip install axiom-fabric-dashboard      # depends on axiom-fabric
-af-dashboard                            # serves http://localhost:7373
+af init                                 # in the directory holding your af.db
+af-dashboard                            # opens http://localhost:7373
 ```
 
-It's a FastAPI backend — a thin presentation layer over the same `axiom_fabric` repository functions, *not* a second data API — plus a Vite/React/React Flow frontend shipped prebuilt in the wheel. It resolves the database the same way the CLI does, and shows a connection error if none is initialized in the current directory. Read-only today; write actions become additive once the core's write APIs land.
+#### Run from this repo (workspace)
+
+The frontend bundle is git-ignored (a build artifact); build it once, then serve:
+
+```bash
+# 1. Build the React + React Flow bundle into src/axiom_fabric_dashboard/static/
+npm --prefix axiom-fabric-dashboard/frontend install
+npm --prefix axiom-fabric-dashboard/frontend run build
+
+# 2. Serve — uses the database in the current directory, same as `af`
+uv run af-dashboard                     # opens http://localhost:7373
+```
+
+If you launch without building first, the page explains how — the API at `/api/health` and `/api/graph` is still live.
+
+#### CLI flags and environment
+
+| Flag / env var          | Default     | Effect                                                   |
+| ----------------------- | ----------- | -------------------------------------------------------- |
+| `--host`                | `127.0.0.1` | Interface to bind.                                       |
+| `--port` / `$AF_DASHBOARD_PORT` | `7373` | Starting port; auto-increments if busy.            |
+| `--no-browser`          | off         | Don't open a browser window on start.                    |
+| `$AF_DATABASE_URL`      | `sqlite:///./af.db` | Same resolution as `af` — Postgres opt-in.        |
+
+If the database isn't initialized (no Alembic revision or no seeded layers), the server still starts and surfaces the problem at `/api/health` and as a 503 on `/api/graph`.
+
+#### Frontend hot-reload (development)
+
+```bash
+cd axiom-fabric-dashboard/frontend
+npm run dev                             # Vite dev server, proxies /api to af-dashboard
+```
+
+Run `af-dashboard` in another shell so the dev server has an API to proxy to.
 
 ### MCP server (planned)
 
@@ -245,6 +355,7 @@ A terminal UI for exploring layer history, inspecting fact lineage, and previewi
 - **DONE:** Core truth store on Postgres — `Layer` / `Fact` / `FactVersion` schema, `af init`, `af layer list`.
 - **DONE:** SQLite supported as a second backend — in-memory and file modes, FK enforcement, dialect-agnostic JSON / UUID columns.
 - **DONE:** Read-only web dashboard (`axiom-fabric-dashboard`) — FastAPI graph API over shared repository functions + a React Flow frontend, served by `af-dashboard`.
+- **DONE:** Fact write CLI — `af fact create / update / retract / list / edges` with cross-layer derivation edges and append-only retraction tombstones.
 - **Next:** First-class layer versions — `layer_versions` table, history CLI, cascade-staleness mechanics.
 - **Later — core loop:** Context assembly + LLM call, write-back loop with gated promotion, branch-cost + cascade re-evaluation, MCP server.
 - **Later — sourced facts:** `FactSource` extension for dynamic data (SQL / HTTP / Python / MCP-tool), snapshot-on-refresh with TTL / cron / on-read policies, fetch provenance recorded in `justification`.

@@ -16,7 +16,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from axiom_fabric.models import (
     EDGE_KINDS,
@@ -26,6 +26,8 @@ from axiom_fabric.models import (
     Layer,
     LayerVersion,
 )
+
+RETRACTION_NOTE = "retracted"
 
 
 class ForwardReferenceError(ValueError):
@@ -187,6 +189,96 @@ def record_fact_version(
         )
     session.flush()
     return fv
+
+
+def list_facts(session: Session, layer: Layer | None = None) -> list[Fact]:
+    """Return facts (optionally filtered to one layer) with their versions eagerly loaded."""
+    stmt = select(Fact).options(selectinload(Fact.versions))
+    if layer is not None:
+        stmt = stmt.where(Fact.layer_id == layer.id)
+    stmt = stmt.order_by(Fact.created_at)
+    return list(session.execute(stmt).scalars().all())
+
+
+def get_fact(session: Session, fact_id: uuid.UUID) -> Fact | None:
+    return session.get(Fact, fact_id)
+
+
+def append_fact(
+    session: Session,
+    layer: Layer,
+    *,
+    content: dict,
+    weight: int,
+    edges_to: Sequence[uuid.UUID] = (),
+    note: str | None = None,
+    schema_ref: str | None = None,
+) -> FactVersion:
+    """Create a new Fact in `layer` with its v1 FactVersion, wrapped in a fresh layer-version."""
+    lv = create_layer_version(
+        session,
+        layer,
+        fact_specs=[
+            FactSpec(
+                content=content,
+                weight=weight,
+                edges_to=edges_to,
+                note=note,
+                schema_ref=schema_ref,
+            )
+        ],
+    )
+    return lv.fact_versions[0]
+
+
+def append_fact_version(
+    session: Session,
+    fact: Fact,
+    *,
+    content: dict,
+    weight: int,
+    edges_to: Sequence[uuid.UUID] = (),
+    note: str | None = None,
+) -> FactVersion:
+    """Append a new version to `fact`, wrapped in a fresh layer-version of the fact's layer."""
+    layer = session.get(Layer, fact.layer_id)
+    if layer is None:  # FK guarantees this, but be explicit.
+        raise ValueError(f"fact {fact.id} references missing layer {fact.layer_id}")
+    lv = create_layer_version(
+        session,
+        layer,
+        fact_specs=[
+            FactSpec(
+                fact_id=fact.id,
+                content=content,
+                weight=weight,
+                edges_to=edges_to,
+                note=note,
+            )
+        ],
+    )
+    return lv.fact_versions[0]
+
+
+def retract_fact(
+    session: Session,
+    fact: Fact,
+    *,
+    note: str | None = None,
+) -> FactVersion:
+    """Append a tombstone fact-version: weight=0, empty content, note marks retraction.
+
+    Append-only — the prior versions remain. Downstream readers should treat any
+    fact whose latest version has note == RETRACTION_NOTE (or weight == 0 with
+    no content) as no longer authoritative.
+    """
+    return append_fact_version(
+        session,
+        fact,
+        content={},
+        weight=0,
+        note=note or RETRACTION_NOTE,
+    )
 
 
 def edges_for(session: Session, fv_id: uuid.UUID) -> tuple[list[FactVersionEdge], list[FactVersionEdge]]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 
 import typer
@@ -7,7 +8,16 @@ from rich.console import Console
 from rich.table import Table
 
 from axiom_fabric.db import session_scope
-from axiom_fabric.facts import edges_for
+from axiom_fabric.facts import (
+    RETRACTION_NOTE,
+    ForwardReferenceError,
+    append_fact,
+    append_fact_version,
+    edges_for,
+    get_fact,
+    list_facts,
+    retract_fact,
+)
 from axiom_fabric.layers import (
     get_layer_by_name,
     get_layer_version,
@@ -167,6 +177,245 @@ def layer_version(
                 str(fv.weight),
                 "" if fv.temperature is None else f"{fv.temperature:.3f}",
             )
+        console.print(table)
+
+
+def _parse_content(raw: str) -> dict:
+    """Parse the --content flag as a JSON object. Exits with code 1 on bad input."""
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        err_console.print(f"[red]--content is not valid JSON:[/red] {e}")
+        raise typer.Exit(code=1) from e
+    if not isinstance(parsed, dict):
+        err_console.print(
+            f"[red]--content must be a JSON object (got {type(parsed).__name__}).[/red]"
+        )
+        raise typer.Exit(code=1)
+    return parsed
+
+
+def _parse_edge_uuids(raw_ids: list[str]) -> list[uuid.UUID]:
+    parsed: list[uuid.UUID] = []
+    for value in raw_ids:
+        try:
+            parsed.append(uuid.UUID(value))
+        except ValueError as e:
+            err_console.print(f"[red]--edges-to is not a valid UUID:[/red] {value} ({e})")
+            raise typer.Exit(code=1) from e
+    return parsed
+
+
+@fact_app.command("create")
+def fact_create(
+    layer: str = typer.Option(..., "--layer", help="Name of the layer to create the fact in."),
+    content: str = typer.Option(
+        ..., "--content", help="Fact body as a JSON object, e.g. '{\"claim\": \"sky is blue\"}'."
+    ),
+    weight: int | None = typer.Option(
+        None, "--weight", min=0, max=100, help="Per-version weight 0-100; defaults to the layer's weight."
+    ),
+    edges_to: list[str] = typer.Option(
+        [],
+        "--edges-to",
+        help="UUID of an upstream fact-version this one derives from. Repeatable.",
+    ),
+    note: str | None = typer.Option(None, "--note", help="Free-text annotation on this version."),
+    schema_ref: str | None = typer.Option(
+        None, "--schema-ref", help="Optional schema identifier for the fact's content."
+    ),
+) -> None:
+    """Create a new fact (its v1 fact-version) in the given layer.
+
+    Each create wraps the new fact-version in a fresh layer-version snapshot of
+    its layer, so the truth ledger stays append-only and fully auditable.
+    """
+    parsed_content = _parse_content(content)
+    edge_ids = _parse_edge_uuids(edges_to)
+
+    with session_scope() as session:
+        target_layer = get_layer_by_name(session, layer)
+        if target_layer is None:
+            err_console.print(f"[red]No such layer:[/red] {layer}")
+            raise typer.Exit(code=1)
+        try:
+            fv = append_fact(
+                session,
+                target_layer,
+                content=parsed_content,
+                weight=weight if weight is not None else target_layer.weight,
+                edges_to=edge_ids,
+                note=note,
+                schema_ref=schema_ref,
+            )
+        except ForwardReferenceError as e:
+            err_console.print(f"[red]Edge target does not exist:[/red] {e}")
+            raise typer.Exit(code=1) from e
+
+        console.print(
+            f"[green]Created fact[/green] {fv.fact_id} "
+            f"[dim](fv {fv.id}, v{fv.version}, weight={fv.weight})[/dim]"
+        )
+
+
+@fact_app.command("update")
+def fact_update(
+    fact_id: str = typer.Option(..., "--fact-id", help="UUID of the existing fact to append a new version to."),
+    content: str = typer.Option(
+        ..., "--content", help="New fact body as a JSON object."
+    ),
+    weight: int | None = typer.Option(
+        None, "--weight", min=0, max=100, help="Per-version weight 0-100; defaults to the prior version's weight."
+    ),
+    edges_to: list[str] = typer.Option(
+        [],
+        "--edges-to",
+        help="UUID of an upstream fact-version this version derives from. Repeatable.",
+    ),
+    note: str | None = typer.Option(None, "--note", help="Free-text annotation on this version."),
+) -> None:
+    """Append a new version to an existing fact (the truth ledger is append-only)."""
+    try:
+        target_id = uuid.UUID(fact_id)
+    except ValueError as e:
+        err_console.print(f"[red]--fact-id is not a valid UUID:[/red] {fact_id} ({e})")
+        raise typer.Exit(code=1) from e
+
+    parsed_content = _parse_content(content)
+    edge_ids = _parse_edge_uuids(edges_to)
+
+    with session_scope() as session:
+        fact = get_fact(session, target_id)
+        if fact is None:
+            err_console.print(f"[red]No fact with id[/red] {fact_id}")
+            raise typer.Exit(code=1)
+        # Carry the prior version's weight forward when --weight isn't given.
+        if weight is None:
+            prior = fact.versions[-1] if fact.versions else None
+            resolved_weight = prior.weight if prior is not None else fact.layer.weight
+        else:
+            resolved_weight = weight
+        try:
+            fv = append_fact_version(
+                session,
+                fact,
+                content=parsed_content,
+                weight=resolved_weight,
+                edges_to=edge_ids,
+                note=note,
+            )
+        except ForwardReferenceError as e:
+            err_console.print(f"[red]Edge target does not exist:[/red] {e}")
+            raise typer.Exit(code=1) from e
+
+        console.print(
+            f"[green]Appended version[/green] v{fv.version} "
+            f"[dim](fv {fv.id}, weight={fv.weight})[/dim] to fact {fv.fact_id}"
+        )
+
+
+@fact_app.command("retract")
+def fact_retract(
+    fact_id: str = typer.Option(..., "--fact-id", help="UUID of the fact to retract."),
+    note: str | None = typer.Option(
+        None, "--note", help=f"Retraction reason (default: '{RETRACTION_NOTE}')."
+    ),
+) -> None:
+    """Tombstone a fact: appends a new version with weight=0 and a retraction note.
+
+    Append-only — prior versions and all their edges remain intact for audit.
+    """
+    try:
+        target_id = uuid.UUID(fact_id)
+    except ValueError as e:
+        err_console.print(f"[red]--fact-id is not a valid UUID:[/red] {fact_id} ({e})")
+        raise typer.Exit(code=1) from e
+
+    with session_scope() as session:
+        fact = get_fact(session, target_id)
+        if fact is None:
+            err_console.print(f"[red]No fact with id[/red] {fact_id}")
+            raise typer.Exit(code=1)
+        fv = retract_fact(session, fact, note=note)
+        console.print(
+            f"[yellow]Retracted fact[/yellow] {fv.fact_id} "
+            f"[dim](tombstone fv {fv.id}, v{fv.version})[/dim]"
+        )
+
+
+@fact_app.command("list")
+def fact_list(
+    layer: str | None = typer.Option(
+        None, "--layer", help="Restrict to facts in this layer."
+    ),
+    latest_only: bool = typer.Option(
+        True,
+        "--latest-only/--all-versions",
+        help="Show one row per fact (latest version) or one row per fact-version.",
+    ),
+) -> None:
+    """List facts (and optionally every version)."""
+    with session_scope() as session:
+        target_layer = None
+        if layer is not None:
+            target_layer = get_layer_by_name(session, layer)
+            if target_layer is None:
+                err_console.print(f"[red]No such layer:[/red] {layer}")
+                raise typer.Exit(code=1)
+        facts = list_facts(session, target_layer)
+
+        if not facts:
+            scope = f" in layer '{layer}'" if layer else ""
+            console.print(f"[dim]No facts{scope}.[/dim]")
+            return
+
+        # Build a name lookup so we can render layer names without re-querying.
+        layer_names = {
+            layer_row.id: layer_row.name for layer_row in list_layers(session)
+        }
+
+        title = "Facts" + (f" in '{layer}'" if layer else "")
+        table = Table(title=title)
+        table.add_column("Fact ID")
+        table.add_column("Layer")
+        if not latest_only:
+            table.add_column("V", justify="right")
+        table.add_column("Latest V" if latest_only else "FV ID")
+        table.add_column("Weight", justify="right")
+        table.add_column("Content")
+        table.add_column("Note")
+
+        for fact in facts:
+            layer_name = layer_names.get(fact.layer_id, str(fact.layer_id))
+            versions = fact.versions if not latest_only else (fact.versions[-1:] if fact.versions else [])
+            if not versions:
+                # Fact with no versions is anomalous, but show it rather than hide it.
+                placeholders = ["-"] * (5 if latest_only else 6)
+                table.add_row(str(fact.id), layer_name, *placeholders)
+                continue
+            for fv in versions:
+                preview = json.dumps(fv.content, sort_keys=True)
+                if len(preview) > 60:
+                    preview = preview[:57] + "..."
+                if latest_only:
+                    table.add_row(
+                        str(fact.id),
+                        layer_name,
+                        str(fv.version),
+                        str(fv.weight),
+                        preview,
+                        fv.note or "",
+                    )
+                else:
+                    table.add_row(
+                        str(fact.id),
+                        layer_name,
+                        str(fv.version),
+                        str(fv.id),
+                        str(fv.weight),
+                        preview,
+                        fv.note or "",
+                    )
         console.print(table)
 
 
