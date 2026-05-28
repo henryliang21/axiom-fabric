@@ -27,3 +27,7 @@ axiom-fabric = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/axiom_fabric_dashboard"]
+# The frontend bundle is git-ignored (a build artifact) but must ship in the
+# wheel. `artifacts` includes otherwise-VCS-ignored files. Build it first:
+#   cd frontend && npm install && npm run build
+artifacts = ["src/axiom_fabric_dashboard/static/**/*"]
