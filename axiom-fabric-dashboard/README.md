@@ -12,10 +12,28 @@ installing the core does **not** pull in the dashboard.
 
 ```bash
 pip install axiom-fabric-dashboard   # also installs axiom-fabric
-af-dashboard --port 7373             # then open http://localhost:7373
+af-dashboard                          # then open http://localhost:7373
 ```
 
-> Status: package scaffold only. The FastAPI app and React/React Flow frontend
-> are not implemented yet — `af-dashboard` currently prints a placeholder.
+## Read-only (for now)
 
-See the [repository root](../README.md) for the full project overview.
+This first version is **read-only**: it visualizes layers, facts, fact-versions,
+and the edge graph. Create / edit / delete will follow the core engine's write
+APIs. The architecture — FastAPI over the core's repository functions, a React
+Flow canvas — is built so editing becomes an additive change.
+
+## Developing the frontend
+
+The UI is a Vite + React + React Flow app under `frontend/`, built into
+`src/axiom_fabric_dashboard/static/` (served by FastAPI, shipped in the wheel,
+not committed to git):
+
+```bash
+cd frontend
+npm install
+npm run build        # writes the bundle the backend serves
+npm run dev          # hot-reload dev server, proxying /api to a running af-dashboard
+```
+
+`af-dashboard` serves the built bundle; if it hasn't been built, the page
+explains how. See the [repository root](../README.md) for the full overview.

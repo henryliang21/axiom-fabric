@@ -214,6 +214,17 @@ with session_scope() as session:
 
 A curated public re-export surface (`axiom_fabric.__init__`) will land alongside the TUI / MCP frontends so callers don't have to reach into submodules.
 
+### Web dashboard
+
+A local, read-only web UI (the separate `axiom-fabric-dashboard` package) for exploring the truth store: facts grouped into layers, connected by their fact-version edges, with a stacked-card affordance for multi-version facts and a side panel showing version history and per-version lineage.
+
+```bash
+pip install axiom-fabric-dashboard      # depends on axiom-fabric
+af-dashboard                            # serves http://localhost:7373
+```
+
+It's a FastAPI backend — a thin presentation layer over the same `axiom_fabric` repository functions, *not* a second data API — plus a Vite/React/React Flow frontend shipped prebuilt in the wheel. It resolves the database the same way the CLI does, and shows a connection error if none is initialized in the current directory. Read-only today; write actions become additive once the core's write APIs land.
+
 ### MCP server (planned)
 
 The Model Context Protocol server is the canonical wire-level integration. An MCP-capable LLM client (Claude Desktop, Cursor, an agentic runner) will be able to browse and query the truth store as a structured resource, *without* the application doing prompt-stuffing.
@@ -233,6 +244,7 @@ A terminal UI for exploring layer history, inspecting fact lineage, and previewi
 
 - **DONE:** Core truth store on Postgres — `Layer` / `Fact` / `FactVersion` schema, `af init`, `af layer list`.
 - **DONE:** SQLite supported as a second backend — in-memory and file modes, FK enforcement, dialect-agnostic JSON / UUID columns.
+- **DONE:** Read-only web dashboard (`axiom-fabric-dashboard`) — FastAPI graph API over shared repository functions + a React Flow frontend, served by `af-dashboard`.
 - **Next:** First-class layer versions — `layer_versions` table, history CLI, cascade-staleness mechanics.
 - **Later — core loop:** Context assembly + LLM call, write-back loop with gated promotion, branch-cost + cascade re-evaluation, MCP server.
 - **Later — sourced facts:** `FactSource` extension for dynamic data (SQL / HTTP / Python / MCP-tool), snapshot-on-refresh with TTL / cron / on-read policies, fetch provenance recorded in `justification`.

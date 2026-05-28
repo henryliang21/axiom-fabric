@@ -219,6 +219,26 @@ Application code stays dialect-agnostic — the `VectorIndex` seam dispatches to
 
 ---
 
+## Running the web dashboard (optional)
+
+The `axiom-fabric-dashboard` workspace member serves a read-only web UI for the
+truth store. Build the frontend bundle once (needs Node ≥ 18 + npm), then launch:
+
+```bash
+# One-time / on frontend change — build the React + React Flow bundle
+npm --prefix axiom-fabric-dashboard/frontend install
+npm --prefix axiom-fabric-dashboard/frontend run build
+
+# Serve it — resolves the database from the current directory, exactly like `af`
+uv run af-dashboard                      # opens http://localhost:7373
+uv run af-dashboard --port 8080 --no-browser
+```
+
+It connects to the same database `af` uses in that directory; if none is
+initialized, the page shows a connection error prompting `af init`. The default
+port is `7373` — override with `--port` or `AF_DASHBOARD_PORT`; it auto-increments
+if the port is busy.
+
 ## Development workflow
 
 Run from the project root; `uv run` auto-activates `.venv/`.
