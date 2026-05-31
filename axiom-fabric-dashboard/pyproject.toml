@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "axiom-fabric-dashboard"
+dynamic = ["version"]
+description = "Web dashboard for Axiom Fabric — visualize layers, facts, and the fact-version edge graph."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "adaptivemake" }]
+dependencies = [
+    "axiom-fabric",
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.30,<1.0",
+]
+
+[project.scripts]
+af-dashboard = "axiom_fabric_dashboard.cli:main"
+
+# Resolve the `axiom-fabric` dependency from the local workspace during dev
+# (rather than from PyPI). When both are published, the version constraint above
+# is what end users get.
+[tool.uv.sources]
+axiom-fabric = { workspace = true }
+
+[tool.hatch.version]
+# Version is computed from git at build time: "0.2.<commit-count>".
+# Shares the count with the core package (both live in the same repo).
+source = "code"
+path = "src/axiom_fabric_dashboard/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/axiom_fabric_dashboard"]
+# The frontend bundle is git-ignored (a build artifact) but must ship in the
+# wheel. `artifacts` includes otherwise-VCS-ignored files. Build it first:
+#   cd frontend && npm install && npm run build
+artifacts = ["src/axiom_fabric_dashboard/static/**/*"]
