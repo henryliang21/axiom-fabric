@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     )
 
     database_url: str = Field(
-        default="postgresql+psycopg://postgres@localhost:5432/henryliang",
+        default="sqlite:///./af.db",
     )
     echo_sql: bool = False
 

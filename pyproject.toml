@@ -1,47 +1,17 @@
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+# Workspace root for the axiom-fabric monorepo.
+# This is a *virtual* root (no [project] of its own) — it only ties the member
+# packages together and holds shared dev tooling. The publishable packages are:
+#   - axiom-fabric            (core + cli + mcp)
+#   - axiom-fabric-dashboard  (web UI; depends on axiom-fabric)
 
-[project]
-name = "axiom-fabric"
-version = "0.0.1"
-description = "The Versioned Truth Layer for Agentic AI."
-readme = "README.md"
-requires-python = ">=3.12"
-license = { text = "MIT" }
-authors = [{ name = "adaptivemake" }]
-dependencies = [
-    "sqlalchemy>=2.0,<3.0",
-    "psycopg[binary]>=3.2,<4.0",
-    "alembic>=1.13,<2.0",
-    "typer>=0.12,<1.0",
-    "pydantic>=2.7,<3.0",
-    "pydantic-settings>=2.3,<3.0",
-    "pyyaml>=6.0,<7.0",
-]
-
-[project.optional-dependencies]
-llm = [
-    "anthropic>=0.39,<1.0",
-    "openai>=1.40,<2.0",
-]
-dev = [
-    "pytest>=8.0,<9.0",
-    "pytest-cov>=5.0,<7.0",
-    "ruff>=0.6,<1.0",
-]
-
-[project.scripts]
-af = "axiom_fabric.cli:app"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/axiom_fabric"]
+[tool.uv.workspace]
+members = ["axiom-fabric", "axiom-fabric-dashboard"]
 
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-src = ["src", "tests"]
-extend-exclude = ["src/axiom_fabric/migrations/versions"]
+src = ["axiom-fabric/src", "axiom-fabric/tests", "axiom-fabric-dashboard/src"]
+extend-exclude = ["axiom-fabric/src/axiom_fabric/migrations/versions"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
@@ -51,5 +21,5 @@ ignore = ["E501"]
 quote-style = "double"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-ra"
+testpaths = ["axiom-fabric/tests", "axiom-fabric-dashboard/tests"]
+addopts = "-ra --import-mode=importlib"
