@@ -298,17 +298,31 @@ A local, read-only web UI (the separate `axiom-fabric-dashboard` package) for ex
 
 It's a FastAPI backend — a thin presentation layer over the same `axiom_fabric` repository functions (`load_graph`, `edges_for`), *not* a second data API — plus a Vite/React/React Flow frontend shipped prebuilt in the wheel. It resolves the database the same way the `af` CLI does (`AF_DATABASE_URL` or `./af.db` in the current directory). Read-only today; write actions become additive once the core's write APIs land.
 
-#### Run from an installed package
+#### Run from an installed package (end users — no Node required)
+
+The published wheel ships the React frontend **prebuilt**, so an installed
+dashboard needs only Python — no Node/npm, no checkout. `pipx` is recommended
+(isolated, on your PATH):
 
 ```bash
-pip install axiom-fabric-dashboard      # depends on axiom-fabric
-af init                                 # in the directory holding your af.db
-af-dashboard                            # opens http://localhost:7373
+pipx install axiom-fabric              # provides `af`
+pipx install axiom-fabric-dashboard    # provides `af-dashboard` (pulls in axiom-fabric)
+pipx ensurepath                        # one-time: add ~/.local/bin to PATH, then reopen the shell
+
+af init                                # in the directory holding your af.db
+af-dashboard                           # opens http://localhost:7373
 ```
 
-#### Run from this repo (workspace)
+`pipx` isolates each app, so installing the dashboard does **not** also expose
+`af` — install both (above), or use `pipx install axiom-fabric-dashboard
+--include-deps` to expose `af` from the bundled dependency too. (Plain `pip
+install axiom-fabric-dashboard` into an active virtualenv gives you both.)
 
-The frontend bundle is git-ignored (a build artifact); build it once, then serve:
+#### Run from this repo (workspace — needs Node to build the frontend)
+
+The frontend bundle is **git-ignored** (a build artifact), so a fresh clone has
+no bundle and the page shows "frontend bundle has not been built" until you
+build it once:
 
 ```bash
 # 1. Build the React + React Flow bundle into src/axiom_fabric_dashboard/static/
@@ -330,7 +344,18 @@ If you launch without building first, the page explains how — the API at `/api
 | `--no-browser`          | off         | Don't open a browser window on start.                    |
 | `$AF_DATABASE_URL`      | `sqlite:///./af.db` | Same resolution as `af` — Postgres opt-in.        |
 
-If the database isn't initialized (no Alembic revision or no seeded layers), the server still starts and surfaces the problem at `/api/health` and as a 503 on `/api/graph`.
+If the database isn't initialized (no Alembic revision or no seeded layers), the server still starts and surfaces the problem at `/api/health` and as a 503 on `/api/graph` — the UI then shows "Can't load the truth store" with the resolved DB path in the message.
+
+> **"Can't load the truth store" after `af init`?** The default DB path
+> (`./af.db`) is **relative to the directory you launch from**. If you ran
+> `af init` in one place but started `af-dashboard` in another, the dashboard
+> opens a *different* (empty) `af.db` — SQLite even creates a blank one on
+> connect. The health message names the exact file it opened; either launch
+> `af-dashboard` from the same directory as your populated `af.db`, or set
+> `AF_DATABASE_URL` to an absolute path (e.g.
+> `export AF_DATABASE_URL='sqlite:////Users/you/proj/af.db'` — note the four
+> slashes for an absolute SQLite path) so the location no longer depends on your
+> working directory.
 
 #### Frontend hot-reload (development)
 
@@ -372,22 +397,49 @@ Treat anything beyond what's marked DONE as design-in-flight — the code is the
 
 ## Setup
 
+Two tracks, depending on whether you want to *use* the tools or *develop* them.
+
+### A. Use it (end users) — `pipx`, no Node, no checkout
+
+The published wheels bundle everything (the dashboard ships its frontend
+prebuilt), so this needs only Python `>=3.12` and [`pipx`](https://pipx.pypa.io):
+
 ```bash
-# Install (editable, with dev + optional LLM extras)
-uv sync --all-extras                     # or: pip install -e './axiom-fabric[dev,llm]'
+pipx install axiom-fabric                 # the `af` CLI
+pipx install axiom-fabric-dashboard       # the `af-dashboard` web UI (pulls in axiom-fabric)
+pipx ensurepath                           # one-time PATH setup; reopen the shell afterward
 
-# Pick a backend
-export AF_DATABASE_URL='sqlite:///./af.db'   # zero-setup local
-# or leave unset to use Postgres at the default URL
-
-# Run migrations + seed
-uv run af init
-
-# Browse
-uv run af layer list
+af init                                    # creates ./af.db in the current directory
+af layer list                              # browse
+af-dashboard                               # http://localhost:7373
 ```
 
-Requires Python `>=3.12`.
+The database defaults to `sqlite:///./af.db` in the working directory — zero
+infrastructure. Point `AF_DATABASE_URL` at Postgres to opt in (see
+[Connecting to PostgreSQL](#connecting-to-postgresql)).
+
+### B. Develop it (from source) — `uv` workspace
+
+Requires Python `>=3.12`, [`uv`](https://github.com/astral-sh/uv), and — only for
+the dashboard frontend — Node 18+ / npm.
+
+```bash
+# 1. Sync the workspace — creates .venv with both packages installed editable
+uv sync --all-extras                       # or: pip install -e './axiom-fabric[dev,llm]'
+
+# 2. (Dashboard only) build the git-ignored frontend bundle, once
+npm --prefix axiom-fabric-dashboard/frontend install
+npm --prefix axiom-fabric-dashboard/frontend run build
+
+# 3. Run migrations + seed, then browse
+uv run af init
+uv run af layer list
+uv run af-dashboard                        # http://localhost:7373
+```
+
+> **Moved the repo or switched OS?** A `.venv` from another machine or an older
+> directory layout breaks with errors like `No module named 'axiom_fabric.cli'`.
+> Rebuild it: `rm -rf .venv && uv sync --all-extras`.
 
 ## License
 

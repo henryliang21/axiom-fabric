@@ -34,15 +34,32 @@ from axiom_fabric_dashboard.schemas import (
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
-_NOT_INITIALIZED = (
-    "No initialized Axiom Fabric database found in this directory. Run `af init` here first."
-)
+_SQLITE_PREFIX = "sqlite:///"
 
 
 def _database_backend() -> str:
     """Scheme of the configured database, e.g. 'sqlite' or 'postgresql'."""
     url = get_settings().database_url
     return url.split("://", 1)[0].split("+", 1)[0] or "unknown"
+
+
+def _database_location() -> str:
+    """Where the configured DB actually lives — the resolved absolute path for a
+    SQLite file (the common 'launched from the wrong directory' footgun), or the
+    URL itself for in-memory / non-SQLite backends."""
+    url = get_settings().database_url
+    if url.startswith(_SQLITE_PREFIX) and ":memory:" not in url:
+        return str(Path(url[len(_SQLITE_PREFIX) :]).resolve())
+    return url
+
+
+def _not_initialized_message() -> str:
+    return (
+        f"No initialized Axiom Fabric database at {_database_location()}. "
+        "Run `af init` in that directory and launch af-dashboard from the same "
+        "place, or set AF_DATABASE_URL to an absolute path so the location no "
+        "longer depends on your working directory."
+    )
 
 
 def _check_health() -> HealthSchema:
@@ -59,7 +76,7 @@ def _check_health() -> HealthSchema:
             database_backend=backend,
             revision=None,
             layer_count=None,
-            message=f"Cannot connect to the {backend} database: {exc}",
+            message=f"Cannot connect to the {backend} database at {_database_location()}: {exc}",
         )
 
     # 2. Has it been migrated?
@@ -71,7 +88,7 @@ def _check_health() -> HealthSchema:
             database_backend=backend,
             revision=None,
             layer_count=None,
-            message=_NOT_INITIALIZED,
+            message=_not_initialized_message(),
         )
 
     # 3. Has it been seeded with at least one layer?
@@ -85,7 +102,7 @@ def _check_health() -> HealthSchema:
         database_backend=backend,
         revision=revision,
         layer_count=layer_count,
-        message="Connected." if initialized else _NOT_INITIALIZED,
+        message="Connected." if initialized else _not_initialized_message(),
     )
 
 
