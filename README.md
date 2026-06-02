@@ -183,8 +183,8 @@ Installed as `af` (Typer-based). Commands are grouped by noun (`layer`, `fact`);
 
 | Command                  | What it does                                                                                  |
 | ------------------------ | --------------------------------------------------------------------------------------------- |
-| `af init`                | Apply migrations and seed the three default layers (idempotent).                              |
-| `af init --skip-seed`    | Migrations only — leave layers empty (for fully custom hierarchies).                          |
+| `af init`                | Apply migrations, producing a **clean (empty) store** — no layers. You (or an agent via MCP) create your own layers and facts. |
+| `af init --demo`         | Also seed three example layers (Canonical / Episodic / Living), each with a v1 snapshot, for a quick tour. |
 | `af status`              | Show DB URL, schema revision, and row counts (layers, fact-versions, edges). Reports `not migrated` instead of crashing if `af init` hasn't run. |
 
 #### Layers
@@ -229,7 +229,7 @@ Notes on the flag shape:
 #### Worked example
 
 ```bash
-af init
+af init --demo          # seed the example layers (or `af layer create` your own)
 
 # Create a canonical fact and capture its fact-version UUID from the output.
 af fact create \
@@ -366,16 +366,113 @@ npm run dev                             # Vite dev server, proxies /api to af-da
 
 Run `af-dashboard` in another shell so the dev server has an API to proxy to.
 
-### MCP server (planned)
+### MCP server (`af-mcp`)
 
-The Model Context Protocol server is the canonical wire-level integration. An MCP-capable LLM client (Claude Desktop, Cursor, an agentic runner) will be able to browse and query the truth store as a structured resource, *without* the application doing prompt-stuffing.
+The Model Context Protocol server lets MCP-capable agents (Claude, Gemini, Codex, …) use the truth store as a **live fact store during execution** — read the facts that constrain a task, and create/update facts as they work — *without* prompt-stuffing. It runs as a local **stdio** subprocess the agent spawns; it resolves the database exactly like `af` (`AF_DATABASE_URL` / `./af.db`) and is a thin adapter over the same `axiom_fabric.layers` / `axiom_fabric.facts` repository functions.
 
-Planned shape:
+Ships in the core package behind the `mcp` extra:
 
-- **Resources:** `layers://`, `layers://<name>`, `layers://<name>/versions/<n>`, `facts://<id>`, `facts://<id>/versions/<n>`.
-- **Read tools:** `list_layers`, `list_facts`, `get_fact_version`, `get_layer_history`, `query_by_layer`.
-- **Write tools (gated behind a flag):** `promote_candidate`, `propose_change`, `reevaluate_stale`. The gateway enforces `Layer Weight` overrides and returns branch-cost on every proposed change.
-- Same `axiom_fabric.layers` / `axiom_fabric.facts` repository functions back both the CLI and the MCP server — the MCP layer is a thin protocol adapter, not a re-implementation.
+```bash
+pipx install "axiom-fabric[mcp]"        # provides `af` and `af-mcp`
+# or, from the workspace:  uv sync --extra mcp
+```
+
+- **Read tools (always on):** `list_layers`, `list_facts`, `get_fact`, `get_fact_version`, `get_fact_edges`, `get_layer_history`, `search_facts`.
+- **Write tools (gated):** `create_layer`, `create_fact`, `update_fact`, `retract_fact` — registered only when the server runs with `--allow-writes` (or `AF_MCP_ALLOW_WRITES=1`). A read-only server never exposes them.
+- **Usage prompt:** the server exposes an MCP prompt `axiom_fabric_usage` (shipped in the wheel — the portable, cross-agent guide) that teaches an agent the append-only / weights / edges model. Per-agent guidance files (Claude skill, Gemini/Codex instructions) live in [`skills/`](skills/).
+
+#### Wiring it into an agent (config)
+
+`af-mcp install` merges the right config block into a client's config file (backing it up first; `--print` does a dry run that writes nothing):
+
+```bash
+af init                                          # clean store in this directory
+af-mcp install --client claude --allow-writes    # Claude Code: writes ./.mcp.json
+af-mcp install --client gemini                   # Gemini CLI:  ~/.gemini/settings.json
+af-mcp install --client codex  --print           # Codex CLI:   preview the ~/.codex/config.toml block
+```
+
+Where each `--client` writes, and the key it adds:
+
+| `--client`       | Config file                                                           | Entry                         |
+| ---------------- | --------------------------------------------------------------------- | ----------------------------- |
+| `claude`         | `./.mcp.json` (project) — or `~/.claude.json` with `--scope user`     | `mcpServers.axiom-fabric`     |
+| `claude-desktop` | `~/Library/Application Support/Claude/claude_desktop_config.json`     | `mcpServers.axiom-fabric`     |
+| `gemini`         | `~/.gemini/settings.json`                                             | `mcpServers.axiom-fabric`     |
+| `codex`          | `~/.codex/config.toml`                                                | `[mcp_servers.axiom-fabric]`  |
+
+The generated block pins `AF_DATABASE_URL` to the **absolute** path of your `af.db`, so the agent reaches the same store regardless of its working directory. For the JSON clients it looks like:
+
+```json
+{
+  "mcpServers": {
+    "axiom-fabric": {
+      "command": "/abs/path/.venv/bin/af-mcp",
+      "args": ["serve", "--allow-writes"],
+      "env": { "AF_DATABASE_URL": "sqlite:////abs/path/af.db" }
+    }
+  }
+}
+```
+
+Drop `--allow-writes` for a read-only server (the four write tools simply won't be registered). To debug without an agent, run it directly: `af-mcp serve --allow-writes` (stdio; diagnostics go to stderr).
+
+#### Teaching the agent how to use it (skills / guidance)
+
+Wiring the server gives the agent the *tools*; the guidance teaches it *how and when* to use them (read-before-act, append-only, weights, edges). The canonical text lives in `axiom-fabric/src/axiom_fabric/mcp/agent_guide.md` and is served live by the server as the MCP prompt **`axiom_fabric_usage`** — any MCP client can fetch it, so it's the portable, zero-setup option.
+
+For a **persistent** copy, add `--with-skill` to the install command — it generates the per-agent guidance file from that same canonical guide and drops it in the right place (using `--scope` to pick project vs. global):
+
+```bash
+af-mcp install --client claude --with-skill   # writes .claude/skills/axiom-fabric/SKILL.md
+af-mcp install --client gemini --with-skill   # merges a block into ./GEMINI.md
+af-mcp install --client codex  --with-skill   # merges a block into ./AGENTS.md
+```
+
+Re-running is safe: the Claude `SKILL.md` is rewritten, and the Gemini/Codex blocks are wrapped in markers so they're replaced in place, never duplicated (your other content is preserved). `claude-desktop` has no skill file — use the MCP prompt there. To do it by hand instead, the same files are committed under [`skills/`](skills/) for reference:
+
+| Agent        | File                                            | Manual install                                                       |
+| ------------ | ----------------------------------------------- | -------------------------------------------------------------------- |
+| Claude Code  | [`skills/claude/SKILL.md`](skills/claude/SKILL.md) | Copy to `.claude/skills/axiom-fabric/SKILL.md` (or `~/.claude/skills/…`). |
+| Gemini CLI   | [`skills/gemini/GEMINI.md`](skills/gemini/GEMINI.md) | Append to your project `GEMINI.md` (or `~/.gemini/GEMINI.md`).       |
+| Codex CLI    | [`skills/codex/AGENTS.md`](skills/codex/AGENTS.md) | Append to your project `AGENTS.md`.                                  |
+
+#### How an agent uses Axiom Fabric to store facts
+
+The loop an agent follows during a task — **read what constrains you, ground your work, record what you conclude**:
+
+1. **Read the relevant truth first.** `list_layers` to see the structure, then `list_facts` / `search_facts` to pull what matters. Treat high-weight facts as hard constraints.
+
+   ```jsonc
+   list_layers()                       → [{ "name": "requirements", "weight": 90, ... }, ...]
+   search_facts({ "query": "auth" })   → [{ "fact_id": "…", "latest_version": { "content": {…} } }]
+   ```
+
+2. **Create a layer if the domain is new** (write tools require `--allow-writes`). `weight` is change-cost gravity (0–100), `ordinal` orders layers (lower = more foundational):
+
+   ```jsonc
+   create_layer({ "name": "decisions", "weight": 60, "ordinal": 50 })
+   ```
+
+3. **Record a new conclusion as a fact**, citing the upstream fact-versions it was derived from (provenance). `content` is always a JSON object; `weight` defaults to the layer's:
+
+   ```jsonc
+   create_fact({
+     "layer": "decisions",
+     "content": { "choice": "use Postgres", "reason": "multi-writer" },
+     "edges_to": ["<requirements fact-version UUID>"]
+   })                                  → { "fact_id": "…", "id": "<fv-uuid>", "version": 1, "weight": 60 }
+   ```
+
+4. **Revise by appending — never overwriting.** `update_fact` adds a *new version*; the prior one stays for audit. `retract_fact` appends a tombstone when something is no longer true:
+
+   ```jsonc
+   update_fact({ "fact_id": "…", "content": { "choice": "use SQLite", "reason": "single-user" } })
+                                       → { "version": 2, ... }   // v1 still queryable
+   retract_fact({ "fact_id": "…", "note": "superseded by the pricing rewrite" })
+   ```
+
+Later steps (and later sessions, even other agents) read those facts back with full lineage — `get_fact` for the version history, `get_fact_edges` for what a fact was derived from and what depends on it. This is the durable, auditable memory the agent builds as it works.
 
 ### TUI (planned)
 
@@ -388,8 +485,10 @@ A terminal UI for exploring layer history, inspecting fact lineage, and previewi
 - **DONE:** Read-only web dashboard (`axiom-fabric-dashboard`) — FastAPI graph API over shared repository functions + a React Flow frontend, served by `af-dashboard`.
 - **DONE:** Fact write CLI — `af fact create / update / retract / list / show / version / edges` with cross-layer edges in all four kinds (`derived_from`, `evidence_of`, `refutes`, `supersedes`) and append-only retraction tombstones.
 - **DONE:** Custom layers + diagnostics — `af layer create` for non-default hierarchies; `af status` reports DB URL, schema revision, and row counts.
+- **DONE:** Clean-start `af init` — produces an empty store by default; `af init --demo` seeds the three example layers.
+- **DONE:** MCP server (`af-mcp`) — read tools always on, write tools gated behind `--allow-writes`, a `axiom_fabric_usage` prompt + Claude skill, and `af-mcp install` for Claude / Gemini / Codex. Thin adapter over the same repository functions as the CLI.
 - **Next:** First-class layer versions — `layer_versions` table, history CLI, cascade-staleness mechanics.
-- **Later — core loop:** Context assembly + LLM call, write-back loop with gated promotion, branch-cost + cascade re-evaluation, MCP server.
+- **Later — core loop:** Context assembly + LLM call, write-back loop with gated promotion, branch-cost + cascade re-evaluation.
 - **Later — sourced facts:** `FactSource` extension for dynamic data (SQL / HTTP / Python / MCP-tool), snapshot-on-refresh with TTL / cron / on-read policies, fetch provenance recorded in `justification`.
 - **Later — beyond:** Dependency-directed backtracking, declarative agent blueprints, constrained decoding, durable execution, human-in-the-loop governance.
 

@@ -72,7 +72,7 @@ export AF_DATABASE_URL='postgresql+psycopg://<user>@localhost:5432/axiom_fabric'
 ### 4. Run migrations + seed and verify
 
 ```bash
-uv run af init           # apply migrations + seed default layers
+uv run af init --demo    # apply migrations + seed the example layers (omit --demo for a clean store)
 uv run af layer list     # should print: canonical, episodic, living
 ```
 
@@ -152,7 +152,7 @@ createdb -U postgres <dbname>
 ### 4. Run migrations + seed and verify
 
 ```powershell
-uv run af init           # apply migrations + seed default layers
+uv run af init --demo    # apply migrations + seed the example layers (omit --demo for a clean store)
 uv run af layer list     # should print: canonical, episodic, living
 ```
 
@@ -270,4 +270,4 @@ The CLI entry point is registered in `axiom-fabric/pyproject.toml` (`af = "axiom
 | `database "<name>" does not exist` after setting a Postgres URL      | The target DB hasn't been created yet. Run `createdb <name>` (or `CREATE DATABASE`), and check the user / password / port in `AF_DATABASE_URL`. |
 | `ModuleNotFoundError: axiom_fabric`                                  | Editable install didn't take. Re-run `uv sync` from the repo root.                                                                |
 | Windows: `Activate.ps1 cannot be loaded because running scripts is disabled` | Run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` in the shell, or just use `uv run` instead of activating. |
-| Alembic complains about missing tables on first run                  | You skipped `af init`. That command runs migrations *and* seeds the three default layers.                                         |
+| Alembic complains about missing tables on first run                  | You skipped `af init`. That command runs migrations (use `--demo` to also seed the example layers).                               |

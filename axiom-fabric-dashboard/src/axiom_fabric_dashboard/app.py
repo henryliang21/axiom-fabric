@@ -91,18 +91,22 @@ def _check_health() -> HealthSchema:
             message=_not_initialized_message(),
         )
 
-    # 3. Has it been seeded with at least one layer?
+    # 3. Migrated store is usable even when empty — a clean `af init` leaves it
+    #    with zero layers, which is a valid (if empty) state, not an error.
     with session_scope() as session:
         layer_count = session.scalar(select(func.count()).select_from(Layer)) or 0
 
-    initialized = layer_count >= 1
+    empty_note = (
+        "Connected — empty store; no layers yet. Create one with `af layer create` "
+        "or let an agent create them via the MCP server."
+    )
     return HealthSchema(
-        status="ok" if initialized else "uninitialized",
-        initialized=initialized,
+        status="ok",
+        initialized=True,
         database_backend=backend,
         revision=revision,
         layer_count=layer_count,
-        message="Connected." if initialized else _not_initialized_message(),
+        message="Connected." if layer_count >= 1 else empty_note,
     )
 
 
