@@ -1,8 +1,12 @@
 # Axiom Fabric
 
-The Versioned Truth Layer for Agentic AI.
+**The Versioned Truth Layer for Agentic AI.**
 
-Axiom Fabric is a versioned, hierarchical **truth ledger** that sits between an application and the LLMs reasoning over it. The goal is to close the gap between **stochastic LLM output** and **deterministic application truth**: rather than re-prompting the model with a static system prompt and hoping it stays consistent, the application maintains an explicit, versioned record of what is true *right now*, and every LLM call is grounded in a specific pinned snapshot of that record.
+Axiom Fabric is a versioned, append-only **truth ledger** that sits between an application and the LLMs reasoning over it. It closes the gap between **stochastic LLM output** and **deterministic application truth**: instead of re-prompting a model with a static system prompt and hoping it stays consistent, your application maintains an explicit, versioned record of what is true *right now*, and every LLM call is grounded in a specific pinned snapshot of that record.
+
+Every fact is versioned. Every model-derived claim is traced through a dependency graph back to the exact upstream facts that produced it. Promoting LLM output into "truth" is an explicit, gated step — never a silent edit. Changing a foundational rule isn't a one-row update; it's a priced decision that cascades through everything built on it.
+
+> **The ambition.** Axiom Fabric is building toward a **truth-maintenance substrate for the AI era** — where autonomous agents reason against an explicit, governed model of truth instead of a disposable prompt; where a contradiction triggers dependency-directed backtracking instead of a confident hallucination; and where every decision an agent makes stays reconstructable, with full provenance, long after it was made. Determinism, provenance, and governance as first-class infrastructure for systems we increasingly let act on their own. The data model and grounding loop work today; the reasoning and governance layers are the roadmap — see [Status](#status) for the line between the two.
 
 ## Why
 
