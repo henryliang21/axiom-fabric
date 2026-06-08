@@ -47,8 +47,8 @@ af_update() {
     printf -v "$fv_var" '%s' "$(printf '%s\n' "$uuids" | sed -n '1p')"
 }
 
-echo "==> 1. Ensure schema + default layers"
-$AF init
+echo "==> 1. Ensure schema + example layers"
+$AF init --demo
 
 echo
 echo "==> 2. Canonical layer — immutable product facts"

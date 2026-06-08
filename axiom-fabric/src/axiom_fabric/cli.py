@@ -62,21 +62,35 @@ err_console = Console(stderr=True)
 
 @app.command()
 def init(
+    demo: bool = typer.Option(
+        False,
+        "--demo",
+        help="Also seed three example layers (Canonical / Episodic / Living) for a quick tour.",
+    ),
     skip_seed: bool = typer.Option(
-        False, "--skip-seed", help="Run migrations but do not seed default layers."
+        False,
+        "--skip-seed",
+        hidden=True,
+        help="Deprecated no-op: a clean store is now the default (use --demo to seed examples).",
     ),
 ) -> None:
-    """Run migrations and seed the three default layers (Canonical / Episodic / Living).
+    """Run migrations, producing a clean (empty) truth store.
 
-    Each default layer also gets a v1 layer-version row on first seeding.
+    By default no layers are created — you (or an agent via MCP) define your own
+    layers and facts. Pass --demo to seed the three example layers, each with a
+    v1 layer-version snapshot, for a quick tour.
     """
     console.print("[bold]Running migrations...[/bold]")
     upgrade_to_head()
     rev = current_revision()
     console.print(f"  schema at revision: [cyan]{rev}[/cyan]")
 
-    if skip_seed:
-        console.print("[yellow]Skipped layer seeding (--skip-seed).[/yellow]")
+    if not demo:
+        console.print(
+            "[green]Clean store ready.[/green] No layers yet — create one with "
+            "[cyan]af layer create[/cyan] (or let an agent create them via MCP). "
+            "Run [cyan]af init --demo[/cyan] for example layers."
+        )
         return
 
     with session_scope() as session:
@@ -84,9 +98,9 @@ def init(
 
     if created:
         names = ", ".join(layer.name for layer in created)
-        console.print(f"[green]Seeded layers (with v1 snapshots):[/green] {names}")
+        console.print(f"[green]Seeded demo layers (with v1 snapshots):[/green] {names}")
     else:
-        console.print("[dim]All default layers already present; nothing to seed.[/dim]")
+        console.print("[dim]All demo layers already present; nothing to seed.[/dim]")
 
 
 @app.command()

@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "axiom-fabric": {
+      "command": "/Users/henryliang/source/adaptivemake/axiom-fabric/.venv/bin/af-mcp",
+      "args": [
+        "serve",
+        "--allow-writes"
+      ],
+      "env": {
+        "AF_DATABASE_URL": "sqlite:////Users/henryliang/source/adaptivemake/axiom-fabric/af.db"
+      }
+    }
+  }
+}

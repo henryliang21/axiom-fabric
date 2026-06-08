@@ -12,9 +12,10 @@ this one. Installing `axiom-fabric` gives you the core + CLI (+ MCP) only.
 ```bash
 pip install axiom-fabric          # core + cli
 pip install "axiom-fabric[llm]"   # + Anthropic / OpenAI extras
+pip install "axiom-fabric[mcp]"   # + the af-mcp MCP server for agents
 
-af init        # apply migrations + seed default layers (SQLite by default)
-af layer list
+af init          # apply migrations -> clean (empty) store; `af init --demo` seeds examples
+af layer list    # (empty after a clean init)
 ```
 
 See the [repository root](../README.md) for the full project overview,
