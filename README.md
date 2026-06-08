@@ -415,7 +415,25 @@ The generated block pins `AF_DATABASE_URL` to the **absolute** path of your `af.
 }
 ```
 
-Drop `--allow-writes` for a read-only server (the four write tools simply won't be registered). To debug without an agent, run it directly: `af-mcp serve --allow-writes` (stdio; diagnostics go to stderr).
+Drop `--allow-writes` for a read-only server (the four write tools simply won't be registered).
+
+#### Launching & verifying it (activating the server)
+
+`af-mcp install` only **writes config** — it does not start anything. The agent process spawns the stdio server itself on its next launch, so you have to (re)start the client, and project-scoped servers additionally require an explicit **approval** (a security gate: `./.mcp.json` is committable, so a cloned repo could carry one).
+
+For **Claude Code**:
+
+1. **Restart** the session (or run `/mcp` to reload) so it re-reads `./.mcp.json`.
+2. **Approve** the `axiom-fabric` project server when prompted — accept it.
+3. **Verify** with `/mcp`: `axiom-fabric` should show *connected*, listing the read tools (plus `create_layer` / `create_fact` / `update_fact` / `retract_fact` if you installed with `--allow-writes`). To the model the tools appear as `mcp__axiom-fabric__<tool>`.
+
+For **Gemini CLI** / **Codex CLI**, restart the CLI — it picks up the new `mcpServers` / `[mcp_servers]` entry on next launch. For **Claude Desktop**, fully quit and reopen the app; the connected server appears under the tools (plug) icon.
+
+To **launch the server by hand** — useful for debugging it without any agent attached — run it directly over stdio (JSON-RPC on stdout, diagnostics on stderr; `Ctrl-C` to stop):
+
+```bash
+af-mcp serve --allow-writes      # drop the flag for a read-only server
+```
 
 #### Teaching the agent how to use it (skills / guidance)
 
@@ -539,6 +557,26 @@ uv run af-dashboard                        # http://localhost:7373
 > **Moved the repo or switched OS?** A `.venv` from another machine or an older
 > directory layout breaks with errors like `No module named 'axiom_fabric.cli'`.
 > Rebuild it: `rm -rf .venv && uv sync --all-extras`.
+
+### C. Connect an AI agent (MCP) — `af-mcp`
+
+To let an MCP-capable agent (Claude Code, Gemini, Codex, …) read and write the
+truth store directly, install the `mcp` extra, then wire and activate the server:
+
+```bash
+pipx install "axiom-fabric[mcp]"               # provides `af` and `af-mcp`
+#   from this repo instead:  uv sync --extra mcp   (then prefix commands with `uv run`)
+
+af init                                          # clean store in this directory
+af-mcp install --client claude --allow-writes --with-skill   # writes ./.mcp.json + the skill
+#   then restart the agent and approve the server (see below)
+```
+
+See [MCP server (`af-mcp`)](#mcp-server-af-mcp) for the full reference —
+[wiring per client](#wiring-it-into-an-agent-config),
+[launching & verifying](#launching--verifying-it-activating-the-server),
+the [skill/guidance files](#teaching-the-agent-how-to-use-it-skills--guidance),
+and [how an agent uses it](#how-an-agent-uses-axiom-fabric-to-store-facts).
 
 ## License
 

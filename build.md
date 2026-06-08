@@ -219,6 +219,53 @@ Application code stays dialect-agnostic — the `VectorIndex` seam dispatches to
 
 ---
 
+## Running the MCP server (`af-mcp`)
+
+`af-mcp` exposes the truth store to MCP-capable agents (Claude Code, Claude
+Desktop, Gemini, Codex) over stdio. Install the extra, then either let an agent
+launch it from config or run it directly:
+
+```bash
+uv sync --extra mcp                 # or: pip install -e './axiom-fabric[mcp]'
+
+# Wire it into an agent's config (writes .mcp.json / equivalent for that client)
+uv run af-mcp install --client claude --allow-writes   # add --with-skill for guidance
+uv run af-mcp install --client codex
+```
+
+A minimal hand-written `.mcp.json` for a project directory:
+
+```json
+{ "mcpServers": { "axiom-fabric": { "command": "af-mcp", "args": ["serve", "--allow-writes"] } } }
+```
+
+Read tools are always on; the write tools (`create_layer`, `create_fact`,
+`update_fact`, `retract_fact`) appear only with `--allow-writes` (or
+`AF_MCP_ALLOW_WRITES=1`).
+
+**No `af init` needed.** The server **auto-initializes the store on the first
+tool call** — each project directory gets its own isolated store, created and
+migrated on first use. (`af-mcp install` pins that directory's `af.db` as an
+absolute `AF_DATABASE_URL` in the config's `env` block; a hand-written config
+with no `env`, as above, falls back to the relative `sqlite:///./af.db` default.) (This is also why `af init` is only needed for
+pure-CLI use, or to seed demo layers with `--demo`.) A missing or unreachable DB
+shows up as an actionable error from the tool, not as a dead server.
+
+**Optional interactive setup (`AF_MCP_ELICIT_SETUP`).** Off by default (first
+call silently creates the SQLite store). Set `AF_MCP_ELICIT_SETUP=1` to instead
+make a fresh directory route first-time setup through the `setup_store` tool,
+which uses MCP elicitation to ask *"create a local SQLite store here, or switch to
+Postgres?"*. Picking SQLite migrates; picking Postgres returns instructions to set
+`AF_DATABASE_URL` in `.mcp.json` and restart (a Postgres choice must be launch-time
+config — it can't be switched at runtime and persisted). If the client can't
+elicit, `setup_store` falls back to creating the SQLite store.
+
+To use **Postgres** instead of per-directory SQLite, set `AF_DATABASE_URL` in the
+server's `env` block in `.mcp.json` (see "Persisting the database URL" above) and
+restart the server.
+
+---
+
 ## Running the web dashboard (optional)
 
 The `axiom-fabric-dashboard` workspace member serves a read-only web UI for the

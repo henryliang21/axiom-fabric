@@ -13,10 +13,16 @@ agent.
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
+from axiom_fabric.config import get_settings
 from axiom_fabric.db import session_scope
 from axiom_fabric.facts import (
     append_fact,
@@ -35,6 +41,7 @@ from axiom_fabric.layers import (
 )
 from axiom_fabric.mcp import serializers as S
 from axiom_fabric.mcp.guide import read_agent_guide
+from axiom_fabric.migrate import ensure_schema, is_initialized
 
 SERVER_NAME = "axiom-fabric"
 
@@ -60,6 +67,110 @@ def _coerce_content(content: Any) -> dict[str, Any]:
     return content
 
 
+def _elicit_setup_enabled() -> bool:
+    """Whether a not-yet-created store should be confirmed via elicitation (opt-in).
+
+    Off by default: the zero-setup path silently creates a local SQLite store on
+    first use. Set AF_MCP_ELICIT_SETUP=1 to instead route first-time setup through
+    the interactive `setup_store` tool.
+    """
+    return os.environ.get("AF_MCP_ELICIT_SETUP", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+@contextmanager
+def _ensured_session() -> Iterator[Session]:
+    """Open a DB session, lazily creating/migrating the store on first use.
+
+    Auto-init runs here rather than at server startup so a missing or unreachable
+    database surfaces as an actionable tool error the agent can relay — not a dead
+    server that only shows as 'failed' in the client's /mcp panel.
+
+    When AF_MCP_ELICIT_SETUP is set, a not-yet-created store is *not* auto-created;
+    the agent is told to call `setup_store`, which confirms SQLite-vs-Postgres via
+    MCP elicitation first.
+    """
+    if _elicit_setup_enabled() and not is_initialized():
+        raise ValueError(
+            "No Axiom Fabric store exists here yet. Call the `setup_store` tool first "
+            "to create one (it confirms a local SQLite store or points you to Postgres)."
+        )
+    try:
+        ensure_schema()
+    except Exception as exc:
+        url = get_settings().database_url
+        raise ValueError(
+            f"Axiom Fabric could not initialize its database at {url!r}: {exc}. "
+            "For SQLite, check the directory is writable; for Postgres, check the server "
+            "is reachable and AF_DATABASE_URL is correct."
+        ) from exc
+    with session_scope() as session:
+        yield session
+
+
+class _StoreSetupChoice(BaseModel):
+    backend: str = Field(
+        default="sqlite",
+        description=(
+            "'sqlite' to create a local store in this directory now, or 'postgres' "
+            "if you will instead point AF_DATABASE_URL at an external Postgres "
+            "database (no local SQLite store is created in that case)."
+        ),
+    )
+
+
+async def _setup_store(ctx: Context) -> dict[str, Any]:
+    """Initialize the Axiom Fabric store for this directory. If none exists yet, asks (via elicitation) whether to create a local SQLite store here or use external Postgres, then migrates accordingly. Idempotent: a no-op if a store already exists."""
+    url = get_settings().database_url
+    if is_initialized():
+        return {"status": "already_initialized", "database_url": url, "created": False}
+
+    is_sqlite = url.startswith("sqlite")
+    choice = "sqlite"
+    elicited = False
+    try:
+        result = await ctx.elicit(
+            message=(
+                f"No Axiom Fabric store exists yet (configured URL: {url}). "
+                "Create a local SQLite store here now, or switch to Postgres?"
+            ),
+            schema=_StoreSetupChoice,
+        )
+        elicited = True
+        if result.action == "accept" and result.data is not None:
+            choice = (result.data.backend or "sqlite").strip().lower()
+        elif result.action in ("decline", "cancel"):
+            return {
+                "status": "cancelled",
+                "created": False,
+                "message": "Store setup cancelled; no database was created.",
+            }
+    except Exception:
+        # Client can't elicit — fall back to the safe default for the configured URL.
+        choice = "sqlite" if is_sqlite else "postgres"
+
+    if choice.startswith("p") and is_sqlite:
+        return {
+            "status": "needs_postgres_config",
+            "created": False,
+            "message": (
+                "To use Postgres, set AF_DATABASE_URL to your postgresql+psycopg://... "
+                "URL in this project's .mcp.json (env block) and restart the MCP server, "
+                "then call a tool again."
+            ),
+        }
+
+    try:
+        fresh = ensure_schema()
+    except Exception as exc:
+        raise ValueError(f"Could not initialize the store at {url!r}: {exc}") from exc
+    return {
+        "status": "initialized" if fresh else "already_initialized",
+        "database_url": url,
+        "created": bool(fresh),
+        "elicited": elicited,
+    }
+
+
 def build_server(allow_writes: bool = False) -> FastMCP:
     server = FastMCP(SERVER_NAME, instructions=_INSTRUCTIONS)
 
@@ -75,7 +186,7 @@ def build_server(allow_writes: bool = False) -> FastMCP:
     # ---- Read tools (always available) ------------------------------------
     def list_all_layers() -> list[dict[str, Any]]:
         """List every layer (policy bucket) with its weight, ordinal, and version count, ordered foundational-first."""
-        with session_scope() as session:
+        with _ensured_session() as session:
             return [S.serialize_layer(layer) for layer in list_layers(session)]
 
     def list_facts_tool(
@@ -84,7 +195,7 @@ def build_server(allow_writes: bool = False) -> FastMCP:
         include_retracted: bool = False,
     ) -> list[dict[str, Any]]:
         """List facts, optionally filtered to one layer. Returns each fact's latest version by default; set latest_only=False for full history, include_retracted=True to include tombstoned facts."""
-        with session_scope() as session:
+        with _ensured_session() as session:
             target = None
             if layer is not None:
                 target = get_layer_by_name(session, layer)
@@ -102,7 +213,7 @@ def build_server(allow_writes: bool = False) -> FastMCP:
     def get_fact_tool(fact_id: str) -> dict[str, Any]:
         """Get one fact identity with its full version history by fact UUID."""
         fid = S.parse_uuid(fact_id, field="fact_id")
-        with session_scope() as session:
+        with _ensured_session() as session:
             fact = get_fact(session, fid)
             if fact is None:
                 raise ValueError(f"No fact with id {fact_id}")
@@ -111,7 +222,7 @@ def build_server(allow_writes: bool = False) -> FastMCP:
     def get_fact_version_tool(fv_id: str) -> dict[str, Any]:
         """Get one specific fact-version (full content + justification) by its UUID."""
         vid = S.parse_uuid(fv_id, field="fv_id")
-        with session_scope() as session:
+        with _ensured_session() as session:
             fv = get_fact_version(session, vid)
             if fv is None:
                 raise ValueError(f"No fact-version with id {fv_id}")
@@ -120,7 +231,7 @@ def build_server(allow_writes: bool = False) -> FastMCP:
     def get_fact_edges_tool(fv_id: str) -> dict[str, Any]:
         """Get the derivation edges for a fact-version: {outgoing: what it derives from, incoming: what derives from it}."""
         vid = S.parse_uuid(fv_id, field="fv_id")
-        with session_scope() as session:
+        with _ensured_session() as session:
             outgoing, incoming = edges_for(session, vid)
             return {
                 "fact_version_id": fv_id,
@@ -130,7 +241,7 @@ def build_server(allow_writes: bool = False) -> FastMCP:
 
     def get_layer_history_tool(layer_name: str) -> dict[str, Any]:
         """Get a layer's snapshot history: every layer-version, oldest first."""
-        with session_scope() as session:
+        with _ensured_session() as session:
             layer = get_layer_by_name(session, layer_name)
             if layer is None:
                 raise ValueError(f"No such layer: {layer_name!r}. Call list_layers to see available layers.")
@@ -142,7 +253,7 @@ def build_server(allow_writes: bool = False) -> FastMCP:
     def search_facts_tool(query: str, layer: str | None = None) -> list[dict[str, Any]]:
         """Find facts whose latest content contains `query` (case-insensitive substring match over the JSON content). Non-semantic; use to locate facts by keyword."""
         needle = query.lower()
-        with session_scope() as session:
+        with _ensured_session() as session:
             target = None
             if layer is not None:
                 target = get_layer_by_name(session, layer)
@@ -158,6 +269,7 @@ def build_server(allow_writes: bool = False) -> FastMCP:
             return out
 
     for fn, name in (
+        (_setup_store, "setup_store"),
         (list_all_layers, "list_layers"),
         (list_facts_tool, "list_facts"),
         (get_fact_tool, "get_fact"),
@@ -179,7 +291,7 @@ def build_server(allow_writes: bool = False) -> FastMCP:
         display_name: str | None = None,
     ) -> dict[str, Any]:
         """Create a new layer (policy bucket). weight 0-100 is its change-cost gravity; ordinal sets order (lower = more foundational); both name and ordinal must be unique."""
-        with session_scope() as session:
+        with _ensured_session() as session:
             layer = create_layer(
                 session,
                 name=name,
@@ -201,7 +313,7 @@ def build_server(allow_writes: bool = False) -> FastMCP:
         """Create a new fact (its v1 version) in `layer`. content is a JSON object. weight defaults to the layer's weight. edges_to lists upstream fact-version UUIDs this fact derives from (they must already exist)."""
         parsed = _coerce_content(content)
         edge_ids = [S.parse_uuid(e, field="edges_to") for e in (edges_to or [])]
-        with session_scope() as session:
+        with _ensured_session() as session:
             target = get_layer_by_name(session, layer)
             if target is None:
                 raise ValueError(f"No such layer: {layer!r}. Create it first with create_layer.")
@@ -229,7 +341,7 @@ def build_server(allow_writes: bool = False) -> FastMCP:
         fid = S.parse_uuid(fact_id, field="fact_id")
         parsed = _coerce_content(content)
         edge_ids = [S.parse_uuid(e, field="edges_to") for e in (edges_to or [])]
-        with session_scope() as session:
+        with _ensured_session() as session:
             fact = get_fact(session, fid)
             if fact is None:
                 raise ValueError(f"No fact with id {fact_id}")
@@ -252,7 +364,7 @@ def build_server(allow_writes: bool = False) -> FastMCP:
     def retract_fact_tool(fact_id: str, note: str | None = None) -> dict[str, Any]:
         """Retract a fact: append a tombstone version (weight 0, empty content). Append-only — prior versions remain for audit."""
         fid = S.parse_uuid(fact_id, field="fact_id")
-        with session_scope() as session:
+        with _ensured_session() as session:
             fact = get_fact(session, fid)
             if fact is None:
                 raise ValueError(f"No fact with id {fact_id}")
