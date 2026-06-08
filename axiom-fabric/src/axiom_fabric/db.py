@@ -77,3 +77,7 @@ def reset_engine_for_tests() -> None:
         _engine.dispose()
     _engine = None
     _SessionLocal = None
+    # Forget the lazy-init flag so the next process-equivalent run re-checks.
+    from axiom_fabric.migrate import reset_schema_state
+
+    reset_schema_state()

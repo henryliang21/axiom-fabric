@@ -183,8 +183,8 @@ Installed as `af` (Typer-based). Commands are grouped by noun (`layer`, `fact`);
 
 | Command                  | What it does                                                                                  |
 | ------------------------ | --------------------------------------------------------------------------------------------- |
-| `af init`                | Apply migrations and seed the three default layers (idempotent).                              |
-| `af init --skip-seed`    | Migrations only — leave layers empty (for fully custom hierarchies).                          |
+| `af init`                | Apply migrations, producing a **clean (empty) store** — no layers. You (or an agent via MCP) create your own layers and facts. |
+| `af init --demo`         | Also seed three example layers (Canonical / Episodic / Living), each with a v1 snapshot, for a quick tour. |
 | `af status`              | Show DB URL, schema revision, and row counts (layers, fact-versions, edges). Reports `not migrated` instead of crashing if `af init` hasn't run. |
 
 #### Layers
@@ -229,7 +229,7 @@ Notes on the flag shape:
 #### Worked example
 
 ```bash
-af init
+af init --demo          # seed the example layers (or `af layer create` your own)
 
 # Create a canonical fact and capture its fact-version UUID from the output.
 af fact create \
@@ -298,17 +298,31 @@ A local, read-only web UI (the separate `axiom-fabric-dashboard` package) for ex
 
 It's a FastAPI backend — a thin presentation layer over the same `axiom_fabric` repository functions (`load_graph`, `edges_for`), *not* a second data API — plus a Vite/React/React Flow frontend shipped prebuilt in the wheel. It resolves the database the same way the `af` CLI does (`AF_DATABASE_URL` or `./af.db` in the current directory). Read-only today; write actions become additive once the core's write APIs land.
 
-#### Run from an installed package
+#### Run from an installed package (end users — no Node required)
+
+The published wheel ships the React frontend **prebuilt**, so an installed
+dashboard needs only Python — no Node/npm, no checkout. `pipx` is recommended
+(isolated, on your PATH):
 
 ```bash
-pip install axiom-fabric-dashboard      # depends on axiom-fabric
-af init                                 # in the directory holding your af.db
-af-dashboard                            # opens http://localhost:7373
+pipx install axiom-fabric              # provides `af`
+pipx install axiom-fabric-dashboard    # provides `af-dashboard` (pulls in axiom-fabric)
+pipx ensurepath                        # one-time: add ~/.local/bin to PATH, then reopen the shell
+
+af init                                # in the directory holding your af.db
+af-dashboard                           # opens http://localhost:7373
 ```
 
-#### Run from this repo (workspace)
+`pipx` isolates each app, so installing the dashboard does **not** also expose
+`af` — install both (above), or use `pipx install axiom-fabric-dashboard
+--include-deps` to expose `af` from the bundled dependency too. (Plain `pip
+install axiom-fabric-dashboard` into an active virtualenv gives you both.)
 
-The frontend bundle is git-ignored (a build artifact); build it once, then serve:
+#### Run from this repo (workspace — needs Node to build the frontend)
+
+The frontend bundle is **git-ignored** (a build artifact), so a fresh clone has
+no bundle and the page shows "frontend bundle has not been built" until you
+build it once:
 
 ```bash
 # 1. Build the React + React Flow bundle into src/axiom_fabric_dashboard/static/
@@ -330,7 +344,18 @@ If you launch without building first, the page explains how — the API at `/api
 | `--no-browser`          | off         | Don't open a browser window on start.                    |
 | `$AF_DATABASE_URL`      | `sqlite:///./af.db` | Same resolution as `af` — Postgres opt-in.        |
 
-If the database isn't initialized (no Alembic revision or no seeded layers), the server still starts and surfaces the problem at `/api/health` and as a 503 on `/api/graph`.
+If the database isn't initialized (no Alembic revision or no seeded layers), the server still starts and surfaces the problem at `/api/health` and as a 503 on `/api/graph` — the UI then shows "Can't load the truth store" with the resolved DB path in the message.
+
+> **"Can't load the truth store" after `af init`?** The default DB path
+> (`./af.db`) is **relative to the directory you launch from**. If you ran
+> `af init` in one place but started `af-dashboard` in another, the dashboard
+> opens a *different* (empty) `af.db` — SQLite even creates a blank one on
+> connect. The health message names the exact file it opened; either launch
+> `af-dashboard` from the same directory as your populated `af.db`, or set
+> `AF_DATABASE_URL` to an absolute path (e.g.
+> `export AF_DATABASE_URL='sqlite:////Users/you/proj/af.db'` — note the four
+> slashes for an absolute SQLite path) so the location no longer depends on your
+> working directory.
 
 #### Frontend hot-reload (development)
 
@@ -341,16 +366,131 @@ npm run dev                             # Vite dev server, proxies /api to af-da
 
 Run `af-dashboard` in another shell so the dev server has an API to proxy to.
 
-### MCP server (planned)
+### MCP server (`af-mcp`)
 
-The Model Context Protocol server is the canonical wire-level integration. An MCP-capable LLM client (Claude Desktop, Cursor, an agentic runner) will be able to browse and query the truth store as a structured resource, *without* the application doing prompt-stuffing.
+The Model Context Protocol server lets MCP-capable agents (Claude, Gemini, Codex, …) use the truth store as a **live fact store during execution** — read the facts that constrain a task, and create/update facts as they work — *without* prompt-stuffing. It runs as a local **stdio** subprocess the agent spawns; it resolves the database exactly like `af` (`AF_DATABASE_URL` / `./af.db`) and is a thin adapter over the same `axiom_fabric.layers` / `axiom_fabric.facts` repository functions.
 
-Planned shape:
+Ships in the core package behind the `mcp` extra:
 
-- **Resources:** `layers://`, `layers://<name>`, `layers://<name>/versions/<n>`, `facts://<id>`, `facts://<id>/versions/<n>`.
-- **Read tools:** `list_layers`, `list_facts`, `get_fact_version`, `get_layer_history`, `query_by_layer`.
-- **Write tools (gated behind a flag):** `promote_candidate`, `propose_change`, `reevaluate_stale`. The gateway enforces `Layer Weight` overrides and returns branch-cost on every proposed change.
-- Same `axiom_fabric.layers` / `axiom_fabric.facts` repository functions back both the CLI and the MCP server — the MCP layer is a thin protocol adapter, not a re-implementation.
+```bash
+pipx install "axiom-fabric[mcp]"        # provides `af` and `af-mcp`
+# or, from the workspace:  uv sync --extra mcp
+```
+
+- **Read tools (always on):** `list_layers`, `list_facts`, `get_fact`, `get_fact_version`, `get_fact_edges`, `get_layer_history`, `search_facts`.
+- **Write tools (gated):** `create_layer`, `create_fact`, `update_fact`, `retract_fact` — registered only when the server runs with `--allow-writes` (or `AF_MCP_ALLOW_WRITES=1`). A read-only server never exposes them.
+- **Usage prompt:** the server exposes an MCP prompt `axiom_fabric_usage` (shipped in the wheel — the portable, cross-agent guide) that teaches an agent the append-only / weights / edges model. Per-agent guidance files (Claude skill, Gemini/Codex instructions) live in [`skills/`](skills/).
+
+#### Wiring it into an agent (config)
+
+`af-mcp install` merges the right config block into a client's config file (backing it up first; `--print` does a dry run that writes nothing):
+
+```bash
+af init                                          # clean store in this directory
+af-mcp install --client claude --allow-writes    # Claude Code: writes ./.mcp.json
+af-mcp install --client gemini                   # Gemini CLI:  ~/.gemini/settings.json
+af-mcp install --client codex  --print           # Codex CLI:   preview the ~/.codex/config.toml block
+```
+
+Where each `--client` writes, and the key it adds:
+
+| `--client`       | Config file                                                           | Entry                         |
+| ---------------- | --------------------------------------------------------------------- | ----------------------------- |
+| `claude`         | `./.mcp.json` (project) — or `~/.claude.json` with `--scope user`     | `mcpServers.axiom-fabric`     |
+| `claude-desktop` | `~/Library/Application Support/Claude/claude_desktop_config.json`     | `mcpServers.axiom-fabric`     |
+| `gemini`         | `~/.gemini/settings.json`                                             | `mcpServers.axiom-fabric`     |
+| `codex`          | `~/.codex/config.toml`                                                | `[mcp_servers.axiom-fabric]`  |
+
+The generated block pins `AF_DATABASE_URL` to the **absolute** path of your `af.db`, so the agent reaches the same store regardless of its working directory. For the JSON clients it looks like:
+
+```json
+{
+  "mcpServers": {
+    "axiom-fabric": {
+      "command": "/abs/path/.venv/bin/af-mcp",
+      "args": ["serve", "--allow-writes"],
+      "env": { "AF_DATABASE_URL": "sqlite:////abs/path/af.db" }
+    }
+  }
+}
+```
+
+Drop `--allow-writes` for a read-only server (the four write tools simply won't be registered).
+
+#### Launching & verifying it (activating the server)
+
+`af-mcp install` only **writes config** — it does not start anything. The agent process spawns the stdio server itself on its next launch, so you have to (re)start the client, and project-scoped servers additionally require an explicit **approval** (a security gate: `./.mcp.json` is committable, so a cloned repo could carry one).
+
+For **Claude Code**:
+
+1. **Restart** the session (or run `/mcp` to reload) so it re-reads `./.mcp.json`.
+2. **Approve** the `axiom-fabric` project server when prompted — accept it.
+3. **Verify** with `/mcp`: `axiom-fabric` should show *connected*, listing the read tools (plus `create_layer` / `create_fact` / `update_fact` / `retract_fact` if you installed with `--allow-writes`). To the model the tools appear as `mcp__axiom-fabric__<tool>`.
+
+For **Gemini CLI** / **Codex CLI**, restart the CLI — it picks up the new `mcpServers` / `[mcp_servers]` entry on next launch. For **Claude Desktop**, fully quit and reopen the app; the connected server appears under the tools (plug) icon.
+
+To **launch the server by hand** — useful for debugging it without any agent attached — run it directly over stdio (JSON-RPC on stdout, diagnostics on stderr; `Ctrl-C` to stop):
+
+```bash
+af-mcp serve --allow-writes      # drop the flag for a read-only server
+```
+
+#### Teaching the agent how to use it (skills / guidance)
+
+Wiring the server gives the agent the *tools*; the guidance teaches it *how and when* to use them (read-before-act, append-only, weights, edges). The canonical text lives in `axiom-fabric/src/axiom_fabric/mcp/agent_guide.md` and is served live by the server as the MCP prompt **`axiom_fabric_usage`** — any MCP client can fetch it, so it's the portable, zero-setup option.
+
+For a **persistent** copy, add `--with-skill` to the install command — it generates the per-agent guidance file from that same canonical guide and drops it in the right place (using `--scope` to pick project vs. global):
+
+```bash
+af-mcp install --client claude --with-skill   # writes .claude/skills/axiom-fabric/SKILL.md
+af-mcp install --client gemini --with-skill   # merges a block into ./GEMINI.md
+af-mcp install --client codex  --with-skill   # merges a block into ./AGENTS.md
+```
+
+Re-running is safe: the Claude `SKILL.md` is rewritten, and the Gemini/Codex blocks are wrapped in markers so they're replaced in place, never duplicated (your other content is preserved). `claude-desktop` has no skill file — use the MCP prompt there. To do it by hand instead, the same files are committed under [`skills/`](skills/) for reference:
+
+| Agent        | File                                            | Manual install                                                       |
+| ------------ | ----------------------------------------------- | -------------------------------------------------------------------- |
+| Claude Code  | [`skills/claude/SKILL.md`](skills/claude/SKILL.md) | Copy to `.claude/skills/axiom-fabric/SKILL.md` (or `~/.claude/skills/…`). |
+| Gemini CLI   | [`skills/gemini/GEMINI.md`](skills/gemini/GEMINI.md) | Append to your project `GEMINI.md` (or `~/.gemini/GEMINI.md`).       |
+| Codex CLI    | [`skills/codex/AGENTS.md`](skills/codex/AGENTS.md) | Append to your project `AGENTS.md`.                                  |
+
+#### How an agent uses Axiom Fabric to store facts
+
+The loop an agent follows during a task — **read what constrains you, ground your work, record what you conclude**:
+
+1. **Read the relevant truth first.** `list_layers` to see the structure, then `list_facts` / `search_facts` to pull what matters. Treat high-weight facts as hard constraints.
+
+   ```jsonc
+   list_layers()                       → [{ "name": "requirements", "weight": 90, ... }, ...]
+   search_facts({ "query": "auth" })   → [{ "fact_id": "…", "latest_version": { "content": {…} } }]
+   ```
+
+2. **Create a layer if the domain is new** (write tools require `--allow-writes`). `weight` is change-cost gravity (0–100), `ordinal` orders layers (lower = more foundational):
+
+   ```jsonc
+   create_layer({ "name": "decisions", "weight": 60, "ordinal": 50 })
+   ```
+
+3. **Record a new conclusion as a fact**, citing the upstream fact-versions it was derived from (provenance). `content` is always a JSON object; `weight` defaults to the layer's:
+
+   ```jsonc
+   create_fact({
+     "layer": "decisions",
+     "content": { "choice": "use Postgres", "reason": "multi-writer" },
+     "edges_to": ["<requirements fact-version UUID>"]
+   })                                  → { "fact_id": "…", "id": "<fv-uuid>", "version": 1, "weight": 60 }
+   ```
+
+4. **Revise by appending — never overwriting.** `update_fact` adds a *new version*; the prior one stays for audit. `retract_fact` appends a tombstone when something is no longer true:
+
+   ```jsonc
+   update_fact({ "fact_id": "…", "content": { "choice": "use SQLite", "reason": "single-user" } })
+                                       → { "version": 2, ... }   // v1 still queryable
+   retract_fact({ "fact_id": "…", "note": "superseded by the pricing rewrite" })
+   ```
+
+Later steps (and later sessions, even other agents) read those facts back with full lineage — `get_fact` for the version history, `get_fact_edges` for what a fact was derived from and what depends on it. This is the durable, auditable memory the agent builds as it works.
 
 ### TUI (planned)
 
@@ -363,8 +503,10 @@ A terminal UI for exploring layer history, inspecting fact lineage, and previewi
 - **DONE:** Read-only web dashboard (`axiom-fabric-dashboard`) — FastAPI graph API over shared repository functions + a React Flow frontend, served by `af-dashboard`.
 - **DONE:** Fact write CLI — `af fact create / update / retract / list / show / version / edges` with cross-layer edges in all four kinds (`derived_from`, `evidence_of`, `refutes`, `supersedes`) and append-only retraction tombstones.
 - **DONE:** Custom layers + diagnostics — `af layer create` for non-default hierarchies; `af status` reports DB URL, schema revision, and row counts.
+- **DONE:** Clean-start `af init` — produces an empty store by default; `af init --demo` seeds the three example layers.
+- **DONE:** MCP server (`af-mcp`) — read tools always on, write tools gated behind `--allow-writes`, a `axiom_fabric_usage` prompt + Claude skill, and `af-mcp install` for Claude / Gemini / Codex. Thin adapter over the same repository functions as the CLI.
 - **Next:** First-class layer versions — `layer_versions` table, history CLI, cascade-staleness mechanics.
-- **Later — core loop:** Context assembly + LLM call, write-back loop with gated promotion, branch-cost + cascade re-evaluation, MCP server.
+- **Later — core loop:** Context assembly + LLM call, write-back loop with gated promotion, branch-cost + cascade re-evaluation.
 - **Later — sourced facts:** `FactSource` extension for dynamic data (SQL / HTTP / Python / MCP-tool), snapshot-on-refresh with TTL / cron / on-read policies, fetch provenance recorded in `justification`.
 - **Later — beyond:** Dependency-directed backtracking, declarative agent blueprints, constrained decoding, durable execution, human-in-the-loop governance.
 
@@ -372,22 +514,69 @@ Treat anything beyond what's marked DONE as design-in-flight — the code is the
 
 ## Setup
 
+Two tracks, depending on whether you want to *use* the tools or *develop* them.
+
+### A. Use it (end users) — `pipx`, no Node, no checkout
+
+The published wheels bundle everything (the dashboard ships its frontend
+prebuilt), so this needs only Python `>=3.12` and [`pipx`](https://pipx.pypa.io):
+
 ```bash
-# Install (editable, with dev + optional LLM extras)
-uv sync --all-extras                     # or: pip install -e './axiom-fabric[dev,llm]'
+pipx install axiom-fabric                 # the `af` CLI
+pipx install axiom-fabric-dashboard       # the `af-dashboard` web UI (pulls in axiom-fabric)
+pipx ensurepath                           # one-time PATH setup; reopen the shell afterward
 
-# Pick a backend
-export AF_DATABASE_URL='sqlite:///./af.db'   # zero-setup local
-# or leave unset to use Postgres at the default URL
-
-# Run migrations + seed
-uv run af init
-
-# Browse
-uv run af layer list
+af init                                    # creates ./af.db in the current directory
+af layer list                              # browse
+af-dashboard                               # http://localhost:7373
 ```
 
-Requires Python `>=3.12`.
+The database defaults to `sqlite:///./af.db` in the working directory — zero
+infrastructure. Point `AF_DATABASE_URL` at Postgres to opt in (see
+[Connecting to PostgreSQL](#connecting-to-postgresql)).
+
+### B. Develop it (from source) — `uv` workspace
+
+Requires Python `>=3.12`, [`uv`](https://github.com/astral-sh/uv), and — only for
+the dashboard frontend — Node 18+ / npm.
+
+```bash
+# 1. Sync the workspace — creates .venv with both packages installed editable
+uv sync --all-extras                       # or: pip install -e './axiom-fabric[dev,llm]'
+
+# 2. (Dashboard only) build the git-ignored frontend bundle, once
+npm --prefix axiom-fabric-dashboard/frontend install
+npm --prefix axiom-fabric-dashboard/frontend run build
+
+# 3. Run migrations + seed, then browse
+uv run af init
+uv run af layer list
+uv run af-dashboard                        # http://localhost:7373
+```
+
+> **Moved the repo or switched OS?** A `.venv` from another machine or an older
+> directory layout breaks with errors like `No module named 'axiom_fabric.cli'`.
+> Rebuild it: `rm -rf .venv && uv sync --all-extras`.
+
+### C. Connect an AI agent (MCP) — `af-mcp`
+
+To let an MCP-capable agent (Claude Code, Gemini, Codex, …) read and write the
+truth store directly, install the `mcp` extra, then wire and activate the server:
+
+```bash
+pipx install "axiom-fabric[mcp]"               # provides `af` and `af-mcp`
+#   from this repo instead:  uv sync --extra mcp   (then prefix commands with `uv run`)
+
+af init                                          # clean store in this directory
+af-mcp install --client claude --allow-writes --with-skill   # writes ./.mcp.json + the skill
+#   then restart the agent and approve the server (see below)
+```
+
+See [MCP server (`af-mcp`)](#mcp-server-af-mcp) for the full reference —
+[wiring per client](#wiring-it-into-an-agent-config),
+[launching & verifying](#launching--verifying-it-activating-the-server),
+the [skill/guidance files](#teaching-the-agent-how-to-use-it-skills--guidance),
+and [how an agent uses it](#how-an-agent-uses-axiom-fabric-to-store-facts).
 
 ## License
 
