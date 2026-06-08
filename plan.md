@@ -116,7 +116,7 @@ Exit criteria: a `FactSource` of each kind can be attached, refreshed manually +
 
 Storage caveat: lands Postgres-only at first. SQLite can store sourced fact-versions, but the JSONB-operator queries some refresh policies need remain Postgres-only.
 
-### Phase 5 — MCP interface (brief's Priority 1)
+### Phase 5 — MCP interface (brief's Priority 1) (DONE)
 
 Deliverables:
 
@@ -125,6 +125,14 @@ Deliverables:
 - **Local-first packaging.** The MCP server ships as both a Python wheel (`pip install axiom-fabric-mcp`) and a portable executable (PyInstaller / Nuitka) so an IDE-embedded agent (Cursor, Claude Desktop) can launch it against a local SQLite file with no Python toolchain on the host.
 
 Exit criteria: an external MCP-capable client can browse and query the truth store without using the CLI; the server runs against a local SQLite file from an IDE plugin context.
+
+**As built:**
+
+- The server lives in the core package as `af-mcp` (extra `[mcp]`, dep `mcp`). It's a thin stdio adapter — each tool opens one session and calls an existing `layers` / `facts` / `graph` repository function, then serializes. `build_server(allow_writes)` in `mcp/server.py` registers the read tools always, write tools (`create_layer` / `create_fact` / `update_fact` / `retract_fact`) only when `--allow-writes` (or `AF_MCP_ALLOW_WRITES=1`). The `axiom_fabric_usage` prompt is single-sourced from `mcp/agent_guide.md`. `af-mcp install --client {claude|claude-desktop|gemini|codex} [--with-skill]` wires up agent configs.
+- **Per-project isolation = the SQLite default (no project table).** Because the stdio server is launched per directory, each project directory gets its own physically-isolated store for free (`af-mcp install` pins that directory's `af.db` as an absolute `AF_DATABASE_URL`; a hand-written config with no `env` uses the relative `sqlite:///./af.db` default). A `project`/tenant column was evaluated and deliberately *not* added — it only pays off for a shared Postgres needing cross-project queries (deferred until that need is real).
+- **Lazy store auto-init (no `af init` required for MCP use).** A `_ensured_session()` chokepoint wraps every tool: on the first tool call it runs `ensure_schema()` (added to `migrate.py`), which checks the stamped Alembic revision and migrates to head if absent — SQLite creates its file on connect, so a missing `af.db` is created + migrated on first use. Init runs at *tool-call* time, not server startup, so a missing/unreachable DB surfaces as an actionable tool error the agent can relay rather than a server that only shows as "failed" in the client's `/mcp` panel. `ensure_schema()` is process-cached (one check after the first call) via a module flag, reset by `reset_engine_for_tests()`.
+- **Optional interactive setup via MCP elicitation (opt-in, off by default).** With `AF_MCP_ELICIT_SETUP=1`, a not-yet-created store is *not* silently auto-created; instead tools return a directive to call the `setup_store` tool, which uses `ctx.elicit(...)` to ask "create a local SQLite store here, or switch to Postgres?". Choosing SQLite migrates; choosing Postgres (while configured for SQLite) returns instructions to set `AF_DATABASE_URL` in `.mcp.json` and restart — the Postgres choice is routed to launch-time config because a runtime DB-switch can't persist across sessions. If the client can't elicit, `setup_store` degrades gracefully to creating the safe-default SQLite store. The default (flag off) is zero-setup: first tool call silently creates the store.
+- Tests: `tests/test_mcp_autoinit.py` covers first-call auto-init on a never-migrated file DB, immediate writes on a fresh store, the elicit-flag gate blocking auto-create, and the `setup_store` no-client fallback + idempotency. `tests/test_mcp_tools.py` and `tests/test_mcp_gating.py` cover the tool surface and read/write gating.
 
 ### Phase 6 — Execution Gateway and TMS (brief's Priority 3)
 
