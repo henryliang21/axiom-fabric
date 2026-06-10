@@ -1,0 +1,54 @@
+name: Publish axiom-fabric to PyPI
+
+# Triggers on publishing a GitHub Release. The release tag is only a trigger:
+# the package version is derived from the git commit count at build time
+# (see axiom-fabric/src/axiom_fabric/_version.py -> 0.2.<commit-count>).
+on:
+  release:
+    types: [published]
+  workflow_dispatch: {}  # allow manual runs from the Actions tab
+
+jobs:
+  build:
+    name: Build wheel + sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # REQUIRED: full history so `git rev-list --count HEAD` resolves the
+          # version. A shallow clone would break the build-time version stamp.
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build the axiom-fabric package only
+        # The repo is a uv workspace; build just the core package, not the dashboard.
+        run: uv build --package axiom-fabric --out-dir dist
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/axiom-fabric/
+    permissions:
+      id-token: write  # REQUIRED for Trusted Publishing (OIDC); no API token needed
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
