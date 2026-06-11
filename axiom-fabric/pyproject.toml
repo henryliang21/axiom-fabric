@@ -39,7 +39,7 @@ af = "axiom_fabric.cli:app"
 af-mcp = "axiom_fabric.mcp.cli:main"
 
 [tool.hatch.version]
-# Version is computed from git at build time: "0.2.<commit-count>".
+# Version is computed from git at build time: "0.3.<commit-count>".
 # See src/axiom_fabric/_version.py for the rule and the no-git failure mode.
 source = "code"
 path = "src/axiom_fabric/_version.py"
