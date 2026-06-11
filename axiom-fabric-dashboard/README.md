@@ -10,18 +10,21 @@ repository functions — it adds no data-access logic of its own, only an HTTP/J
 presentation layer and the frontend bundle. It is published separately, so
 installing the core does **not** pull in the dashboard.
 
-The wheel ships the frontend **prebuilt**, so installing needs no Node/npm:
+The wheel ships the frontend **prebuilt**, so an *installed* dashboard needs no
+Node/npm. **PyPI publication is pending** — for now, run it from this repo
+(needs Node 18+ to build the frontend once):
 
 ```bash
-pipx install axiom-fabric-dashboard   # isolated; pulls in axiom-fabric (the `af` core)
-pipx ensurepath                       # one-time PATH setup, then reopen the shell
-af init                               # from the core; creates ./af.db here
-af-dashboard                          # then open http://localhost:7373
+uv sync --all-extras                                  # from the workspace root
+npm --prefix frontend install                         # one-time
+npm --prefix frontend run build
+uv run af init                                        # creates ./af.db here
+uv run af-dashboard                                   # then open http://localhost:7373
 ```
 
-`pipx` exposes only this package's `af-dashboard`. For `af` too, run `pipx
-install axiom-fabric` as well, or use `--include-deps`. (A plain `pip install
-axiom-fabric-dashboard` into a virtualenv gives you both.)
+Once published: `pipx install axiom-fabric-dashboard` (pulls in the
+`axiom-fabric` core; add `--include-deps` to also expose `af`, or use plain
+`pip install` into a virtualenv to get both).
 
 ## Read-only (for now)
 
