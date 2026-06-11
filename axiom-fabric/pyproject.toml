@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "axiom-fabric"
 dynamic = ["version"]
-description = "The Versioned Truth Layer for Agentic AI."
+description = "The governance ledger for agentic AI — versioned truth with provenance, trust weights, and append-only audit history."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
