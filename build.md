@@ -207,7 +207,7 @@ export AF_DATABASE_URL='sqlite:///./af.db'
 ### 4. Run migrations + seed and verify
 
 ```bash
-uv run af init           # apply migrations + seed default layers
+uv run af init --demo    # apply migrations + seed the example layers (omit --demo for a clean store)
 uv run af layer list     # should print: canonical, episodic, living
 ```
 
@@ -285,7 +285,7 @@ createdb -U postgres <dbname>
 ### 4. Run migrations + seed and verify
 
 ```powershell
-uv run af init           # apply migrations + seed default layers
+uv run af init --demo    # apply migrations + seed the example layers (omit --demo for a clean store)
 uv run af layer list     # should print: canonical, episodic, living
 ```
 

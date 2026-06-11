@@ -44,5 +44,11 @@ af-mcp = "axiom_fabric.mcp.cli:main"
 source = "code"
 path = "src/axiom_fabric/_version.py"
 
+[tool.hatch.build]
+# Must ship in the package regardless of any gitignore rules (hatchling skips
+# VCS-ignored files): read_agent_guide() serves this as the MCP
+# `axiom_fabric_usage` prompt and as the source for `af-mcp install --with-skill`.
+artifacts = ["src/axiom_fabric/mcp/agent_guide.md"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/axiom_fabric"]
