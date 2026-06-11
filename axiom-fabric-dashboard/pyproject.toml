@@ -26,7 +26,7 @@ af-dashboard = "axiom_fabric_dashboard.cli:main"
 axiom-fabric = { workspace = true }
 
 [tool.hatch.version]
-# Version is computed from git at build time: "0.2.<commit-count>".
+# Version is computed from git at build time: "0.3.<commit-count>".
 # Shares the count with the core package (both live in the same repo).
 source = "code"
 path = "src/axiom_fabric_dashboard/_version.py"

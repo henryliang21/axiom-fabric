@@ -113,7 +113,7 @@ def _check_health() -> HealthSchema:
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Axiom Fabric Dashboard",
-        version="0.0.1",
+        version="0.3",
         description="Read-only view of the Axiom Fabric truth store.",
     )
 

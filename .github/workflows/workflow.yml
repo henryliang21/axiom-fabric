@@ -2,7 +2,7 @@ name: Publish axiom-fabric to PyPI
 
 # Triggers on publishing a GitHub Release. The release tag is only a trigger:
 # the package version is derived from the git commit count at build time
-# (see axiom-fabric/src/axiom_fabric/_version.py -> 0.2.<commit-count>).
+# (see axiom-fabric/src/axiom_fabric/_version.py -> 0.3.<commit-count>).
 on:
   release:
     types: [published]
