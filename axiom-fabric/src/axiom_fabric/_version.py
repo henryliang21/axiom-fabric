@@ -16,7 +16,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-_MAJOR_MINOR = "0.3"
+_MAJOR_MINOR = "0.4"
 
 
 def _commit_count() -> str:
