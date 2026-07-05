@@ -33,6 +33,7 @@ class FactVersionNode:
     temperature: float | None
     note: str | None
     created_at: datetime
+    stale_since: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -122,6 +123,7 @@ def load_graph(session: Session) -> GraphSnapshot:
                     temperature=fv.temperature,
                     note=fv.note,
                     created_at=fv.created_at,
+                    stale_since=fv.stale_since,
                 )
                 for fv in fact.versions
             ]

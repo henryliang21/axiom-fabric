@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from axiom_fabric.config import get_settings
+from axiom_fabric.cost import change_cost, list_stale_fact_versions
 from axiom_fabric.db import session_scope
 from axiom_fabric.facts import (
     append_fact,
@@ -42,6 +43,12 @@ from axiom_fabric.layers import (
 from axiom_fabric.mcp import serializers as S
 from axiom_fabric.mcp.guide import read_agent_guide
 from axiom_fabric.migrate import ensure_schema, is_initialized
+from axiom_fabric.sources import (
+    FactSourceSpec,
+    attach_source,
+    get_source,
+    refresh_fact,
+)
 
 SERVER_NAME = "axiom-fabric"
 
@@ -268,6 +275,32 @@ def build_server(allow_writes: bool = False) -> FastMCP:
                     out.append(S.serialize_fact(fact, latest_only=True))
             return out
 
+    def change_cost_tool(fv_id: str) -> dict[str, Any]:
+        """Price a change to a fact-version: sum(weight x depth x temperature) over everything derived from it (its descendant subtree). Use before updating/retracting a fact to see the blast radius - high total = a foundational truth, low/zero = a leaf."""
+        vid = S.parse_uuid(fv_id, field="fv_id")
+        with _ensured_session() as session:
+            fv = get_fact_version(session, vid)
+            if fv is None:
+                raise ValueError(f"No fact-version with id {fv_id}")
+            return S.serialize_change_cost(change_cost(session, vid))
+
+    def list_stale_tool() -> list[dict[str, Any]]:
+        """List every fact-version currently flagged stale — its derivation was superseded or retracted upstream and may no longer hold. Each is a candidate for re-derivation (append a new version) or review."""
+        with _ensured_session() as session:
+            return [S.serialize_fact_version(fv) for fv in list_stale_fact_versions(session)]
+
+    def get_fact_source_tool(fact_id: str) -> dict[str, Any]:
+        """Get the dynamic source configured on a fact (kind, refresh policy, last refresh), or {configured: false} if it is a static fact."""
+        fid = S.parse_uuid(fact_id, field="fact_id")
+        with _ensured_session() as session:
+            fact = get_fact(session, fid)
+            if fact is None:
+                raise ValueError(f"No fact with id {fact_id}")
+            source = get_source(session, fact)
+            if source is None:
+                return {"fact_id": fact_id, "configured": False}
+            return {"configured": True, **S.serialize_source(source)}
+
     for fn, name in (
         (_setup_store, "setup_store"),
         (list_all_layers, "list_layers"),
@@ -277,6 +310,9 @@ def build_server(allow_writes: bool = False) -> FastMCP:
         (get_fact_edges_tool, "get_fact_edges"),
         (get_layer_history_tool, "get_layer_history"),
         (search_facts_tool, "search_facts"),
+        (change_cost_tool, "change_cost"),
+        (list_stale_tool, "list_stale"),
+        (get_fact_source_tool, "get_fact_source"),
     ):
         server.add_tool(fn, name=name)
 
@@ -371,11 +407,52 @@ def build_server(allow_writes: bool = False) -> FastMCP:
             fv = retract_fact(session, fact, note=note)
             return S.serialize_fact_version(fv)
 
+    def attach_source_tool(
+        fact_id: str,
+        kind: str,
+        uri: str | None = None,
+        params: dict[str, Any] | None = None,
+        refresh_policy: str = "manual",
+        ttl_seconds: int | None = None,
+        schedule_cron: str | None = None,
+    ) -> dict[str, Any]:
+        """Make a fact dynamic by attaching a source (kind: inline | python | sql | http | mcp_tool). Refreshing it later appends a new snapshot version with fetch provenance. inline carries its value in params['value']; python resolves uri 'module:callable'. refresh_policy 'ttl' needs ttl_seconds."""
+        fid = S.parse_uuid(fact_id, field="fact_id")
+        with _ensured_session() as session:
+            fact = get_fact(session, fid)
+            if fact is None:
+                raise ValueError(f"No fact with id {fact_id}")
+            source = attach_source(
+                session,
+                fact,
+                FactSourceSpec(
+                    kind=kind,
+                    uri=uri,
+                    params=params,
+                    refresh_policy=refresh_policy,
+                    ttl_seconds=ttl_seconds,
+                    schedule_cron=schedule_cron,
+                ),
+            )
+            return S.serialize_source(source)
+
+    def refresh_fact_tool(fact_id: str) -> dict[str, Any]:
+        """Fetch a sourced fact's current value and append it as a NEW snapshot version (append-only; the prior version stays pinned for reproducibility). This cascades staleness to anything derived from the prior version."""
+        fid = S.parse_uuid(fact_id, field="fact_id")
+        with _ensured_session() as session:
+            fact = get_fact(session, fid)
+            if fact is None:
+                raise ValueError(f"No fact with id {fact_id}")
+            fv = refresh_fact(session, fact)
+            return S.serialize_fact_version(fv)
+
     for fn, name in (
         (create_layer_tool, "create_layer"),
         (create_fact_tool, "create_fact"),
         (update_fact_tool, "update_fact"),
         (retract_fact_tool, "retract_fact"),
+        (attach_source_tool, "attach_source"),
+        (refresh_fact_tool, "refresh_fact"),
     ):
         server.add_tool(fn, name=name)
 

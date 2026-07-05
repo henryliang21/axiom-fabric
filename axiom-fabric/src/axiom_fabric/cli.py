@@ -11,6 +11,7 @@ from rich.table import Table
 from sqlalchemy import func, select, text
 
 from axiom_fabric.config import get_settings
+from axiom_fabric.cost import change_cost, list_stale_fact_versions
 from axiom_fabric.db import get_engine, session_scope
 from axiom_fabric.facts import (
     RETRACTION_NOTE,
@@ -34,6 +35,14 @@ from axiom_fabric.layers import (
 )
 from axiom_fabric.migrate import current_revision, upgrade_to_head
 from axiom_fabric.models import Fact, FactVersion, FactVersionEdge, Layer, LayerVersion
+from axiom_fabric.sources import (
+    FactSourceSpec,
+    SourceError,
+    attach_source,
+    detach_source,
+    get_source,
+    refresh_fact,
+)
 
 
 class EdgeKind(str, Enum):
@@ -43,6 +52,25 @@ class EdgeKind(str, Enum):
     evidence_of = "evidence_of"
     refutes = "refutes"
     supersedes = "supersedes"
+
+
+class SourceKind(str, Enum):
+    """Mirrors models.SOURCE_KINDS as a Typer-friendly choice."""
+
+    inline = "inline"
+    python = "python"
+    sql = "sql"
+    http = "http"
+    mcp_tool = "mcp_tool"
+
+
+class RefreshPolicy(str, Enum):
+    """Mirrors models.REFRESH_POLICIES as a Typer-friendly choice."""
+
+    manual = "manual"
+    on_read = "on_read"
+    ttl = "ttl"
+    scheduled = "scheduled"
 
 app = typer.Typer(
     name="af",
@@ -55,6 +83,9 @@ app.add_typer(layer_app, name="layer")
 
 fact_app = typer.Typer(help="Inspect facts and fact-versions.", no_args_is_help=True)
 app.add_typer(fact_app, name="fact")
+
+source_app = typer.Typer(help="Attach and refresh dynamic (sourced) facts.", no_args_is_help=True)
+app.add_typer(source_app, name="source")
 
 console = Console()
 err_console = Console(stderr=True)
@@ -710,6 +741,218 @@ def fact_edges(
             console.print(table)
         else:
             console.print("[dim]No incoming edges.[/dim]")
+
+
+@fact_app.command("cost")
+def fact_cost(
+    fv_id: str = typer.Argument(..., help="Fact-version UUID to price a change to."),
+) -> None:
+    """Change cost of altering a fact-version: sum(weight x depth x temperature) over its descendant subtree."""
+    try:
+        target = uuid.UUID(fv_id)
+    except ValueError as e:
+        err_console.print(f"[red]Not a valid UUID:[/red] {fv_id} ({e})")
+        raise typer.Exit(code=1) from e
+
+    with session_scope() as session:
+        fv = get_fact_version(session, target)
+        if fv is None:
+            err_console.print(f"[red]No fact-version with id[/red] {fv_id}")
+            raise typer.Exit(code=1)
+        report = change_cost(session, target)
+
+        console.print(
+            f"[bold]Change cost[/bold] for fact-version {fv_id}\n"
+            f"  Total:            [cyan]{report.total:g}[/cyan]\n"
+            f"  Descendants:      {report.descendant_count}"
+        )
+        if not report.nodes:
+            console.print(
+                "[dim]No descendants — nothing derives from this version, so the "
+                "change is free.[/dim]"
+            )
+            return
+        table = Table(title="Descendant subtree (the blast radius)")
+        table.add_column("FV ID")
+        table.add_column("Depth", justify="right")
+        table.add_column("Weight", justify="right")
+        table.add_column("Temp", justify="right")
+        table.add_column("Penalty", justify="right")
+        table.add_column("Contribution", justify="right")
+        for n in report.nodes:
+            table.add_row(
+                str(n.fact_version_id),
+                str(n.depth),
+                str(n.weight),
+                "" if n.temperature is None else f"{n.temperature:.3f}",
+                f"{n.penalty:.3f}",
+                f"{n.contribution:g}",
+            )
+        console.print(table)
+
+
+@fact_app.command("stale")
+def fact_stale() -> None:
+    """List every fact-version currently flagged stale (an upstream derivation was superseded)."""
+    with session_scope() as session:
+        stale = list_stale_fact_versions(session)
+        if not stale:
+            console.print("[green]No stale fact-versions.[/green]")
+            return
+        table = Table(title="Stale fact-versions")
+        table.add_column("FV ID")
+        table.add_column("Fact ID")
+        table.add_column("V", justify="right")
+        table.add_column("Weight", justify="right")
+        table.add_column("Stale since")
+        for fv in stale:
+            table.add_row(
+                str(fv.id),
+                str(fv.fact_id),
+                str(fv.version),
+                str(fv.weight),
+                fv.stale_since.isoformat(timespec="seconds") if fv.stale_since else "",
+            )
+        console.print(table)
+
+
+def _parse_fact_uuid(fact_id: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(fact_id)
+    except ValueError as e:
+        err_console.print(f"[red]--fact-id is not a valid UUID:[/red] {fact_id} ({e})")
+        raise typer.Exit(code=1) from e
+
+
+@source_app.command("attach")
+def source_attach(
+    fact_id: str = typer.Option(..., "--fact-id", help="UUID of the fact to make sourced."),
+    kind: SourceKind = typer.Option(
+        ..., "--kind", case_sensitive=False, help="inline | python | sql | http | mcp_tool."
+    ),
+    uri: str | None = typer.Option(
+        None, "--uri", help="Kind-specific target, e.g. 'module:callable' for python."
+    ),
+    params: str | None = typer.Option(
+        None, "--params", help="JSON object of fetch params (e.g. inline: '{\"value\": {...}}')."
+    ),
+    refresh_policy: RefreshPolicy = typer.Option(
+        RefreshPolicy.manual,
+        "--refresh-policy",
+        case_sensitive=False,
+        help="manual | on_read | ttl | scheduled.",
+    ),
+    ttl_seconds: int | None = typer.Option(
+        None, "--ttl-seconds", min=0, help="Required for the 'ttl' policy."
+    ),
+    schedule_cron: str | None = typer.Option(
+        None, "--schedule-cron", help="Cron expr for the 'scheduled' policy (external scheduler)."
+    ),
+) -> None:
+    """Attach a source to a fact so it can be refreshed into new snapshot versions."""
+    target = _parse_fact_uuid(fact_id)
+    parsed_params = _parse_content(params) if params is not None else None
+
+    with session_scope() as session:
+        fact = get_fact(session, target)
+        if fact is None:
+            err_console.print(f"[red]No fact with id[/red] {fact_id}")
+            raise typer.Exit(code=1)
+        try:
+            source = attach_source(
+                session,
+                fact,
+                FactSourceSpec(
+                    kind=kind.value,
+                    uri=uri,
+                    params=parsed_params,
+                    refresh_policy=refresh_policy.value,
+                    ttl_seconds=ttl_seconds,
+                    schedule_cron=schedule_cron,
+                ),
+            )
+        except (SourceError, ValueError) as e:
+            err_console.print(f"[red]{e}[/red]")
+            raise typer.Exit(code=1) from e
+        console.print(
+            f"[green]Attached {source.kind} source[/green] to fact {source.fact_id} "
+            f"[dim](policy={source.refresh_policy})[/dim]"
+        )
+
+
+@source_app.command("show")
+def source_show(
+    fact_id: str = typer.Argument(..., help="Fact identity UUID."),
+) -> None:
+    """Show the source configured on a fact (if any)."""
+    target = _parse_fact_uuid(fact_id)
+    with session_scope() as session:
+        fact = get_fact(session, target)
+        if fact is None:
+            err_console.print(f"[red]No fact with id[/red] {fact_id}")
+            raise typer.Exit(code=1)
+        source = get_source(session, fact)
+        if source is None:
+            console.print(f"[dim]Fact {fact_id} has no source (it is a static fact).[/dim]")
+            return
+        console.print(f"[bold]Source[/bold] for fact {fact_id}")
+        console.print(f"  Kind:            [cyan]{source.kind}[/cyan]")
+        console.print(f"  URI:             {source.uri or '[dim](none)[/dim]'}")
+        console.print(f"  Refresh policy:  {source.refresh_policy}")
+        console.print(
+            "  TTL seconds:     "
+            + ("[dim](none)[/dim]" if source.ttl_seconds is None else str(source.ttl_seconds))
+        )
+        console.print(f"  Schedule cron:   {source.schedule_cron or '[dim](none)[/dim]'}")
+        console.print(
+            "  Last refreshed:  "
+            + (
+                "[dim](never)[/dim]"
+                if source.last_refreshed_at is None
+                else source.last_refreshed_at.isoformat(timespec="seconds")
+            )
+        )
+        _print_json_block(source.params, label="Params")
+
+
+@source_app.command("refresh")
+def source_refresh(
+    fact_id: str = typer.Option(..., "--fact-id", help="UUID of the sourced fact to refresh."),
+) -> None:
+    """Fetch the source's current value and append it as a new snapshot version."""
+    target = _parse_fact_uuid(fact_id)
+    with session_scope() as session:
+        fact = get_fact(session, target)
+        if fact is None:
+            err_console.print(f"[red]No fact with id[/red] {fact_id}")
+            raise typer.Exit(code=1)
+        try:
+            fv = refresh_fact(session, fact)
+        except SourceError as e:
+            err_console.print(f"[red]{e}[/red]")
+            raise typer.Exit(code=1) from e
+        console.print(
+            f"[green]Refreshed[/green] fact {fv.fact_id} "
+            f"[dim](new fv {fv.id}, v{fv.version})[/dim]"
+        )
+
+
+@source_app.command("detach")
+def source_detach(
+    fact_id: str = typer.Option(..., "--fact-id", help="UUID of the fact to make static again."),
+) -> None:
+    """Remove a fact's source. Its existing versions and history are untouched."""
+    target = _parse_fact_uuid(fact_id)
+    with session_scope() as session:
+        fact = get_fact(session, target)
+        if fact is None:
+            err_console.print(f"[red]No fact with id[/red] {fact_id}")
+            raise typer.Exit(code=1)
+        removed = detach_source(session, fact)
+        if removed:
+            console.print(f"[yellow]Detached source[/yellow] from fact {fact_id}.")
+        else:
+            console.print(f"[dim]Fact {fact_id} had no source.[/dim]")
 
 
 if __name__ == "__main__":

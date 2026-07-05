@@ -15,7 +15,7 @@ These are the invariants the implementation is built around:
 - **Layers vs. edges are orthogonal.** Layer assignment governs *policy* — write authority, default weight, promotion target, whether the LLM may mutate the fact. `fact_version_edges` govern *derivation* — which upstream fact-versions a given fact-version was built from. The two never need to align: a Living fact-version directly justified by a Canonical fact-version (skipping Episodic) is the normal case, not the exception.
 - **Append-only ⇒ acyclic by construction.** A `fact_version` insert may only cite upstream fact-version IDs that already exist. The DAG only ever points backward in time, so cycles at the version level are physically impossible — no cycle-detection pass is needed. Apparent cycles at the *fact-identity* level (A.v2 cites B.v1 which cites A.v1) represent mutual refinement across versions, not pathology — surface them as a UI hint, never reject them.
 - **Promotion direction.** Default: candidate facts promote into the **next layer up** from the highest layer present in the source generation's context. Callers can override.
-- **Cascade re-evaluation (planned mechanics).** When a layer-version is re-created (or a sourced fact-version refreshes), every downstream fact-version reachable through `fact_version_edges` is marked **stale**, never silently re-pinned. Layer-version staleness is a *derived view*: a layer-version is stale iff it pins any stale fact-version. Resolving a stale fact-version is its own decision, with its own cost.
+- **Cascade re-evaluation.** When a fact-version is superseded (a new version appended) or retracted, every downstream fact-version reachable through `fact_version_edges` is marked **stale**, never silently re-pinned. The cascade runs *inside the writing transaction* (`facts.record_fact_version` → `cost.mark_subtree_stale`), so it is persisted atomically and is correct across concurrent writers — including a shared Postgres — without any notification layer: every reader is stateless and sees the flags on its next query. Layer-version staleness is a *derived view*: a layer-version is stale iff it pins any stale fact-version. Resolving a stale fact-version is its own decision, with its own cost.
 - **Branch cost, not point cost.** Cost is `Σ(weight × depth × temperature)` summed over the **descendant subtree** in the edge graph, so the caller is choosing where to *alter the truth*, not just which row to edit.
 - **Snapshots, not live reads.** Dynamic data (DB rows, API responses, crawl output) enters the store as snapshotted fact-versions with fetch provenance, never as live resolvers fired at generation time. A generation grounded in `inventory=47` must replay identically tomorrow even if the upstream system now reads `inventory=12`. Freshness is governed per-fact by refresh policy, not by reaching across the boundary mid-prompt.
 
@@ -32,15 +32,16 @@ Layer ──┬─< Fact ──< FactVersion
         └─ name, weight, ordinal
 ```
 
-Five tables (defined in `axiom-fabric/src/axiom_fabric/models.py`):
+Six tables (defined in `axiom-fabric/src/axiom_fabric/models.py`):
 
 | Table                | Purpose                                                  | Key columns                                                                      |
 | -------------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------- |
 | `layers`             | Truth layer = policy (write authority, default weight)   | `name`, `weight`, `ordinal`                                                      |
 | `layer_versions`     | Immutable snapshots of a layer                           | `layer_id`, `version`, `weight`, `notes`                                         |
 | `facts`              | Fact identity (stable across versions)                   | `layer_id`, `schema_ref`                                                         |
-| `fact_versions`      | Versioned fact payloads                                  | `fact_id`, `layer_version_id`, `content` (JSON), `weight`, `justification`, `temperature` |
+| `fact_versions`      | Versioned fact payloads                                  | `fact_id`, `layer_version_id`, `content` (JSON), `weight`, `justification`, `temperature`, `stale_since` |
 | `fact_version_edges` | Derivation DAG between fact-versions                     | `source_fv_id`, `target_fv_id`, `edge_kind`                                      |
+| `fact_sources`       | Optional 1:1 sidecar making a fact *dynamic* (sourced)   | `fact_id`, `kind`, `uri`, `params`, `refresh_policy`, `ttl_seconds`, `last_refreshed_at` |
 
 Semantics:
 
@@ -51,25 +52,25 @@ Semantics:
 - **`edge_kind`** ∈ {`derived_from`, `evidence_of`, `refutes`, `supersedes`}. Edges always connect **fact-versions** (never fact identities) and may cross layers freely.
 - **Write-path invariant:** every `target_fv_id` must already exist at insert time (`ForwardReferenceError` otherwise). That single check is the entire cycle-prevention mechanism.
 - **Retraction** appends a tombstone version (`weight=0`, `content={}`, `note="retracted"`) — prior versions stay intact for audit.
+- **`stale_since`** — NULL means fresh. Set by the cascade when an upstream derivation is superseded/retracted. A mutable governance annotation only; it never alters `content`, so a pinned generation still replays identically.
 
-### Change cost (planned, Phase: staleness + cost)
+### Change cost & cascade staleness (implemented — `cost.py`)
 
-Given a proposed change to a fact-version or layer-version, walk descendants via `fact_version_edges` with a recursive CTE (same query text on Postgres and SQLite) and compute:
+Both primitives read the derivation DAG through one dialect-agnostic **recursive CTE** over `fact_version_edges` (`_descendants_query` — identical query text on SQLite and Postgres, built with SQLAlchemy Core), and are surfaced on the CLI (`af fact cost`, `af fact stale`) and MCP (`change_cost`, `list_stale`).
 
-```
-Cost = Σ (Layer Weight × Depth × Temperature Penalty)
-```
+- **`change_cost(session, fv_id)`** walks the descendant subtree (everything transitively derived from `fv_id`, each node at its shortest depth) and returns `Cost = Σ (weight × depth × temperature_penalty)`. Used before altering a fact so the caller compares "rewrite a foundational rule" (large, deep subtree → high cost) vs. "rewrite a leaf" (zero cost) before committing. **Temperature penalty** = the fact-version's `temperature` (generation confidence in [0, 1]) as a multiplier, so low-confidence facts are cheaper to rewrite; a missing temperature defaults to `1.0` (most expensive).
+- **`mark_subtree_stale` / `clear_stale` / `list_stale_fact_versions`** implement the cascade above. The cascade is triggered automatically inside `record_fact_version` whenever a fact gets a *later* version (v2+) or a tombstone — so a supersession/retraction flags its descendants in the same transaction. `layer_version_is_stale` is the derived layer-version view.
 
-over the descendant subtree. Returned on every proposed change so the caller compares "rewrite a foundational rule" vs. "rewrite a leaf" before committing.
+**Cross-process note (why there is no notify/outbox layer).** Because every frontend is stateless-read (CLI per-command, MCP per-tool-call, dashboard per-request all open a fresh `session_scope`), external writes to a shared Postgres are seen on the next read with no cache to invalidate, and the staleness cascade — being a committed DB write — is likewise visible to every reader. A push mechanism only becomes useful for a *long-lived cached consumer* (e.g. a live-updating dashboard). If that lands, the industrial-standard shape is a **transactional outbox** table (durable, ordered, replayable "what changed") as the source of truth, with a low-latency doorbell on top — `pg_notify` on Postgres, `PRAGMA data_version` on SQLite — behind a dialect-agnostic seam (mirroring the `VectorIndex` seam). Deliberately deferred until a cached consumer exists.
 
-### Dynamic / sourced facts (planned design)
+### Dynamic / sourced facts (implemented — `sources.py`)
 
-The current model is static — every `FactVersion` is a frozen snapshot, written once. Applications also need facts that track changing values (inventory, customer status, a scraped page). The chosen design is **snapshot-on-refresh**, not live-resolve:
+A static `FactVersion` is a frozen snapshot written once; applications also need facts that track changing values (inventory, customer status, a scraped page). The design is **snapshot-on-refresh**, not live-resolve:
 
-- A new `fact_sources` table (1:1, optional, on `facts`) carries `kind` (`sql` / `http` / `python` / `mcp_tool`), the connection URI, params, and a refresh policy (`on_read` / `ttl` / `manual` / `scheduled`) with `ttl_seconds` / `schedule_cron`.
-- Each refresh writes a new `FactVersion` whose `justification` records fetch provenance — `source`, `fetched_at`, `fresh_until` — alongside any upstream-derivation links.
-- Reads, version pinning, cost calculus, and cascade staleness all reuse the existing fact-version + edge path. Dynamic and static facts are indistinguishable to consumers, and reproducibility is preserved: pinned generations always see the snapshot value.
-- MCP is a natural ingress: external MCP tools (`inventory.get(sku)`, `weather.now(city)`) are valid source kinds — the ledger consumes MCP for sourcing *and* exposes MCP for reading.
+- The `fact_sources` table (1:1, optional, on `facts`) carries `kind` (`inline` / `python` / `sql` / `http` / `mcp_tool`), a kind-specific `uri`, `params`, and a refresh policy (`manual` / `on_read` / `ttl` / `scheduled`) with `ttl_seconds` / `schedule_cron`.
+- **`refresh_fact`** fetches the current value via the source's resolver and appends a new `FactVersion` whose `justification` records fetch provenance — `source`, `fetched_at`, `fresh_until`. **`refresh_if_due`** consults the policy (`due_for_refresh`) and dedupes unchanged fetches so polling an `on_read`/`ttl` source does not accrete identical versions.
+- Reads, version pinning, cost calculus, and cascade staleness all reuse the existing fact-version + edge path — a refresh is an ordinary supersession, so it cascades staleness to descendants for free. Reproducibility is preserved: pinned generations always see the snapshot value, never a live one.
+- **Resolvers live behind a seam** (`register_resolver(kind, fn)`). `inline` (value carried in `params['value']`) and `python` (a dotted `module:callable`) ship wired; `sql` / `http` / `mcp_tool` are recognized and storable but raise an actionable "no resolver wired" error until a deployment registers one — keeping networked I/O and extra dependencies out of the core until needed. MCP is a natural ingress here: an external MCP tool (`inventory.get(sku)`, `weather.now(city)`) is a valid `mcp_tool` source — the ledger consumes MCP for sourcing *and* exposes MCP (`attach_source`, `refresh_fact`) for it.
 
 ## Repository layout
 
@@ -301,6 +302,10 @@ uv run af layer list                       # all layers
 uv run af layer history canonical          # version snapshots of a layer
 uv run af layer version canonical 1        # one layer-version + its pinned fact-versions
 uv run af fact edges <fact-version-uuid>   # derivation edges in/out of a fact-version
+uv run af fact cost <fact-version-uuid>    # change cost: Σ(weight × depth × temperature) over descendants
+uv run af fact stale                       # every fact-version flagged stale by a cascade
+uv run af source show <fact-uuid>          # the source config on a dynamic fact (if any)
+uv run af source refresh --fact-id <uuid>  # fetch + append a new snapshot version
 ```
 
 Or dump the raw schema with SQLAlchemy's inspector:
@@ -357,17 +362,17 @@ Application code stays dialect-agnostic — the `VectorIndex` seam dispatches to
 
 ## MCP server (`af-mcp`)
 
-`af-mcp` exposes the ledger to MCP-capable agents (Claude Code, Claude Desktop, Gemini CLI, Codex CLI) over **stdio**. It ships in the core package behind the `mcp` extra and is a thin adapter over the same `axiom_fabric.layers` / `axiom_fabric.facts` repository functions — `build_server(allow_writes)` in `mcp/server.py` registers the tools and the `axiom_fabric_usage` prompt.
+`af-mcp` exposes the ledger to MCP-capable agents (Claude Code, Claude Desktop, Gemini CLI, Codex CLI) over **stdio**. Because Axiom Fabric is built to be driven by agents, the `mcp` dependency is part of the **default install** (not an opt-in extra), so `af-mcp` works out of the box. It is a thin adapter over the same `axiom_fabric.layers` / `axiom_fabric.facts` repository functions — `build_server(allow_writes)` in `mcp/server.py` registers the tools and the `axiom_fabric_usage` prompt.
 
 ```bash
-uv sync --extra mcp                 # or: pip install -e './axiom-fabric[mcp]'
+uv sync                             # or: pip install axiom-fabric  (MCP is included by default)
 
 # Wire it into an agent's config (writes .mcp.json / equivalent for that client)
 uv run af-mcp install --client claude --allow-writes   # add --with-skill for guidance
 uv run af-mcp install --client codex
 ```
 
-Read tools are always on; the write tools (`create_layer`, `create_fact`, `update_fact`, `retract_fact`) are registered only with `--allow-writes` (or `AF_MCP_ALLOW_WRITES=1`).
+Read tools are always on: `list_layers`, `list_facts`, `get_fact`, `get_fact_version`, `get_fact_edges`, `get_layer_history`, `search_facts`, `change_cost`, `list_stale`, `get_fact_source`. The write tools (`create_layer`, `create_fact`, `update_fact`, `retract_fact`, `attach_source`, `refresh_fact`) are registered only with `--allow-writes` (or `AF_MCP_ALLOW_WRITES=1`).
 
 ### Where each client's config lands
 
@@ -491,7 +496,8 @@ The CLI entry point is registered in `axiom-fabric/pyproject.toml` (`af = "axiom
 - **Fact content shape.** `content` JSON plus optional `schema_ref` on `facts` — typed schema-bound records and free-text claims share one table.
 - **LLM interface scope (planned).** Anthropic SDK and OpenAI SDK behind a small provider-abstraction seam.
 - **Vector indexing (planned).** pgvector on Postgres, sqlite-vec on SQLite, behind a `VectorIndex` seam so the query path stays dialect-agnostic.
-- **Dynamic facts.** Snapshot-on-refresh, never live-resolve (see [the design](#dynamic--sourced-facts-planned-design)).
+- **Dynamic facts.** Snapshot-on-refresh, never live-resolve (implemented — see [Dynamic / sourced facts](#dynamic--sourced-facts-implemented--sourcespy)).
+- **Change cost & staleness.** Recursive-CTE branch cost + in-transaction cascade staleness (implemented — see [Change cost & cascade staleness](#change-cost--cascade-staleness-implemented--costpy)). Cross-process change notification (outbox + `pg_notify`/`data_version`) deferred until a long-lived cached consumer exists.
 - **Still proposed, not committed:** Temporal.io (durable execution), Outlines/Guidance (constraint manifolds), MAEB store + HITL toggle (governance). Confirm before adopting.
 
 ---

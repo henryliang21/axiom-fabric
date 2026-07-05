@@ -86,6 +86,7 @@ name = "axiom-fabric"
 source = { editable = "axiom-fabric" }
 dependencies = [
     { name = "alembic" },
+    { name = "mcp" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -104,15 +105,12 @@ llm = [
     { name = "anthropic" },
     { name = "openai" },
 ]
-mcp = [
-    { name = "mcp" },
-]
 
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.13,<2.0" },
     { name = "anthropic", marker = "extra == 'llm'", specifier = ">=0.39,<1.0" },
-    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.9,<2.0" },
+    { name = "mcp", specifier = ">=1.9,<2.0" },
     { name = "openai", marker = "extra == 'llm'", specifier = ">=1.40,<2.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4.0" },
     { name = "pydantic", specifier = ">=2.7,<3.0" },

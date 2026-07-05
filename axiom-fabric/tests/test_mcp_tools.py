@@ -167,3 +167,56 @@ def test_bad_uuid_errors(rw):
     with pytest.raises(Exception) as exc:
         call(rw, "get_fact", fact_id="not-a-uuid")
     assert "uuid" in str(exc.value).lower()
+
+
+# ---- change cost + staleness ----------------------------------------------
+
+def test_change_cost_and_cascade_staleness(rw):
+    call(rw, "create_layer", name="canonical", weight=90, ordinal=0)
+    call(rw, "create_layer", name="living", weight=10, ordinal=100)
+    a = call(rw, "create_fact", layer="canonical", content={"c": "A"}, weight=90)
+    b = call(rw, "create_fact", layer="living", content={"c": "B"}, weight=40, edges_to=[a["id"]])
+
+    cost = call(rw, "change_cost", fv_id=a["id"])
+    assert cost["descendant_count"] == 1
+    assert cost["total"] == 40.0  # 40 x depth 1 x penalty 1 (no temperature)
+    assert cost["nodes"][0]["fact_version_id"] == b["id"]
+
+    # Nothing stale yet; superseding A flags B.
+    assert call(rw, "list_stale") == []
+    call(rw, "update_fact", fact_id=a["fact_id"], content={"c": "A2"})
+    stale = call(rw, "list_stale")
+    assert [s["id"] for s in stale] == [b["id"]]
+    assert stale[0]["stale"] is True
+
+
+# ---- dynamic / sourced facts ----------------------------------------------
+
+def test_attach_and_refresh_source(rw):
+    call(rw, "create_layer", name="living", weight=10, ordinal=100)
+    fact = call(rw, "create_fact", layer="living", content={"inv": 0})
+
+    assert call(rw, "get_fact_source", fact_id=fact["fact_id"])["configured"] is False
+    src = call(
+        rw,
+        "attach_source",
+        fact_id=fact["fact_id"],
+        kind="inline",
+        params={"value": {"inv": 47}},
+    )
+    assert src["kind"] == "inline"
+
+    fv = call(rw, "refresh_fact", fact_id=fact["fact_id"])
+    assert fv["version"] == 2
+    assert fv["content"] == {"inv": 47}
+    assert fv["justification"]["source"]["kind"] == "inline"
+    assert call(rw, "get_fact_source", fact_id=fact["fact_id"])["configured"] is True
+
+
+def test_source_tools_gated_behind_writes():
+    ro = build_server(allow_writes=False)
+    tools = _run(ro.list_tools())
+    names = {t.name for t in tools}
+    # Reads exposed, writes hidden on a read-only server.
+    assert {"change_cost", "list_stale", "get_fact_source"} <= names
+    assert {"attach_source", "refresh_fact"}.isdisjoint(names)

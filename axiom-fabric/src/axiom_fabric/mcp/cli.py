@@ -18,9 +18,10 @@ import sys
 from axiom_fabric.mcp.install import CLIENTS
 
 _MCP_MISSING_HINT = (
-    "The MCP SDK is not installed. Install the optional extra:\n"
-    "    pipx install 'axiom-fabric[mcp]'      # or: pip install 'axiom-fabric[mcp]'\n"
-    "    uv sync --extra mcp                    # from the workspace"
+    "The MCP SDK ('mcp') is not importable, but it is a core dependency of "
+    "axiom-fabric — your environment looks broken or partially installed. Reinstall:\n"
+    "    pip install --force-reinstall axiom-fabric   # or: pip install 'mcp>=1.9,<2.0'\n"
+    "    uv sync                                       # from the workspace"
 )
 
 

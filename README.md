@@ -7,7 +7,7 @@ Agent memory systems answer *"what do I remember that's relevant?"* Axiom Fabric
 It is a versioned, append-only **truth ledger** that sits between an application and the LLMs reasoning over it. Every fact carries explicit provenance (which upstream facts it was derived from), an explicit trust weight, and a full version history. LLM output never silently becomes truth — promotion is a gated, traceable step — and when a foundational fact changes, everything derived from it can be found, priced, and re-evaluated.
 
 ```bash
-pip install axiom-fabric        # `af` CLI — Python ≥ 3.12, zero infrastructure (SQLite built in)
+pip install axiom-fabric        # `af` CLI + `af-mcp` server — Python ≥ 3.12, zero infrastructure (SQLite built in)
 ```
 
 ## Why a governance ledger, not another memory system
@@ -26,7 +26,7 @@ Axiom Fabric is the layer *beneath* memory that fixes those three gaps, drawing 
 | --- | --- |
 | Lost provenance | Every fact-version records a `justification` and **derivation edges** to the exact upstream fact-versions it was built from — a queryable DAG, kept forever. |
 | Implicit trust | Facts live in **layers** with explicit weights (0–100). A canonical law at weight 90 and a tentative inference at weight 10 are different things, by policy, not by prompt position. |
-| No invalidation | **Cascade staleness + change cost** (in development): change one fact and every downstream derivation is flagged stale — never silently re-pinned — with a priced re-evaluation plan. |
+| No invalidation | **Cascade staleness + change cost**: change one fact and every downstream derivation is flagged stale — never silently re-pinned — with a priced (`Σ weight × depth × temperature`) re-evaluation plan. |
 
 It is **complementary to** memory systems, not a replacement: let your agent's memory own recall and friction-free capture; Axiom Fabric is where load-bearing facts get recorded, audited, promoted, and invalidated. The truth your agent can't silently rewrite.
 
@@ -101,6 +101,9 @@ Commands are grouped by noun. `af status` shows the resolved DB, schema revision
 | `af fact retract --fact-id <uuid>` | Append a tombstone version. |
 | `af fact list [--layer <name>] [--all-versions]` | Table view. |
 | `af fact show <fact-id>` / `af fact version <fv-uuid>` / `af fact edges <fv-uuid>` | Drill into a fact, one version, or its derivation edges. |
+| `af fact cost <fv-uuid>` / `af fact stale` | Price a change over the descendant subtree; list fact-versions flagged stale by a cascade. |
+| `af source attach --fact-id <uuid> --kind <kind> [--params '<json>'] [--refresh-policy <p>]` | Make a fact dynamic (`inline` / `python` wired; `sql` / `http` / `mcp_tool` via a resolver seam). |
+| `af source show <fact-id>` / `af source refresh --fact-id <uuid>` / `af source detach --fact-id <uuid>` | Inspect, snapshot-refresh, or remove a fact's source. |
 
 `--edges-to` takes fact-version UUIDs (targets must already exist — that's the cycle prevention); `--edge-kind` is one of `derived_from` (default), `evidence_of`, `refutes`, `supersedes`.
 
@@ -109,13 +112,13 @@ Commands are grouped by noun. `af status` shows the resolved DB, schema revision
 The `af-mcp` server lets any MCP-capable agent (Claude Code, Claude Desktop, Gemini CLI, Codex CLI, …) use the ledger as a **live fact store during execution** — read the facts that constrain a task, record conclusions with provenance as it works — without prompt-stuffing.
 
 ```bash
-pip install "axiom-fabric[mcp]"                  # provides `af` and `af-mcp`
+pip install axiom-fabric                         # `af` + the `af-mcp` server (MCP is built in)
 af-mcp install --client claude --allow-writes --with-skill
 # then restart the agent and approve the server
 ```
 
-- **Read tools (always on):** `list_layers`, `list_facts`, `get_fact`, `get_fact_version`, `get_fact_edges`, `get_layer_history`, `search_facts`.
-- **Write tools (opt-in):** `create_layer`, `create_fact`, `update_fact`, `retract_fact` — only registered when the server runs with `--allow-writes` (or `AF_MCP_ALLOW_WRITES=1`). A read-only server physically lacks them.
+- **Read tools (always on):** `list_layers`, `list_facts`, `get_fact`, `get_fact_version`, `get_fact_edges`, `get_layer_history`, `search_facts`, `change_cost`, `list_stale`, `get_fact_source`.
+- **Write tools (opt-in):** `create_layer`, `create_fact`, `update_fact`, `retract_fact`, `attach_source`, `refresh_fact` — only registered when the server runs with `--allow-writes` (or `AF_MCP_ALLOW_WRITES=1`). A read-only server physically lacks them.
 - **Zero setup:** the server auto-creates and migrates the store on the first tool call. Each project directory gets its own isolated ledger.
 - **Built-in guidance:** the MCP prompt `axiom_fabric_usage` teaches the agent the model (read-before-act, append-only, weights, provenance edges); `--with-skill` drops a persistent per-agent guidance file.
 
@@ -172,23 +175,23 @@ with session_scope() as session:
 
 - **Append-only truth store** — `layers` / `layer_versions` / `facts` / `fact_versions` / `fact_version_edges`, dialect-agnostic across SQLite (default, zero-setup) and Postgres (`AF_DATABASE_URL`).
 - **Derivation DAG** — provenance edges between fact-versions in four kinds (`derived_from`, `evidence_of`, `refutes`, `supersedes`), cross-layer by design, acyclic by construction.
-- **Full write CLI** — `af fact create / update / retract / list / show / version / edges`, `af layer create / list / history / version`, `af status` diagnostics, clean-start `af init`.
+- **Cascade staleness + change cost** — superseding or retracting a fact flags every downstream fact-version **stale** in the same transaction (a derived view for layer-versions); `af fact cost` / the `change_cost` MCP tool price a proposed change as `Σ(weight × depth × temperature)` over its descendant subtree via a dialect-agnostic recursive CTE.
+- **Dynamic / sourced facts** — attach a `FactSource` (`inline` / `python` wired; `sql` / `http` / `mcp_tool` behind a resolver seam) with a refresh policy (`manual` / `on_read` / `ttl` / `scheduled`); each refresh appends a snapshot version with fetch provenance and cascades staleness like any other change.
+- **Full write CLI** — `af fact create / update / retract / list / show / version / edges / cost / stale`, `af source attach / show / refresh / detach`, `af layer create / list / history / version`, `af status` diagnostics, clean-start `af init`.
 - **MCP server** (`af-mcp`) — read tools always on, write tools gated, agent guidance prompt + skills, one-command install for Claude / Claude Desktop / Gemini / Codex.
 - **Read-only web dashboard** — FastAPI + React Flow graph explorer over the same repository functions.
 
 ### Planned
 
-The roadmap, in order. The flagship governance mechanics — staleness, cost, gated promotion — are the next milestones.
+The roadmap, in order. With cascade staleness, change cost, and sourced facts now shipped, gated promotion and the execution gateway are the next milestones.
 
 1. **Context assembly + pinned generation.** A YAML DSL declaring layers and canonical facts; a query API ("the truth relevant to prompt X") with semantic retrieval (pgvector / sqlite-vec behind one seam); deterministic serialization so the same pinned fact-versions produce byte-identical context; `af generate` against Anthropic / OpenAI behind a provider seam.
 2. **Write-back loop & gated promotion.** Every prompt/response logged as an episodic fact; LLM outputs become *candidate* facts carrying generation confidence; `af promote` commits a candidate into the next layer up, writing edges to every source fact-version — so any promoted fact traces back to the exact prompt and upstream versions that produced it.
-3. **Cascade staleness + change cost.** The flagship: change a foundational fact and every downstream fact-version reachable through the derivation DAG is marked **stale** — never silently re-pinned — via a dialect-agnostic recursive CTE. Proposed changes are priced up-front: `Σ(weight × depth × temperature)` over the descendant subtree, so callers compare "rewrite a foundational rule" vs. "rewrite a leaf" before committing. `af cost`, `af stale`, `af reevaluate`.
-4. **Sourced / dynamic facts.** First-class `FactSource` (SQL / HTTP / Python / MCP-tool) with snapshot-on-refresh: each refresh appends a fact-version with fetch provenance (`source`, `fetched_at`, `fresh_until`), and a refresh triggers downstream staleness through the same cascade as any other change. Live values, reproducible generations.
-5. **Execution gateway + TMS backtracking.** An authorization plane that intercepts LLM-proposed truth changes before commit; when a proposal contradicts high-weight facts, dependency-directed backtracking over the derivation DAG returns the minimal-cost set of facts to rewrite — or a rejection — instead of letting the contradiction land.
-6. **Cognitive blueprints.** Agent identity, allowed tools, and per-layer weight policies as declarative, version-controlled YAML artifacts. Switching projects = swapping a blueprint.
-7. **Constraint manifolds.** Constrained decoding (Outlines / Guidance) masking tokens that would contradict canonical facts at generation time — for local-model paths that expose token-level control.
-8. **Durable execution.** Promotion, gateway adjudication, and cascade re-evaluation as replayable workflows (Temporal.io) so a crash mid-operation never leaves the ledger inconsistent.
-9. **Governance & HITL.** Cost-threshold human approval for expensive truth rewrites, and an evidence bundle (policy version, input context, decision record) for every truth-altering decision — so an auditor can reconstruct *why* any fact-version exists.
+3. **Execution gateway + TMS backtracking.** An authorization plane that intercepts LLM-proposed truth changes before commit; when a proposal contradicts high-weight facts, dependency-directed backtracking over the derivation DAG returns the minimal-cost set of facts to rewrite — or a rejection — instead of letting the contradiction land. (Builds directly on the shipped change-cost walk.)
+4. **Cognitive blueprints.** Agent identity, allowed tools, and per-layer weight policies as declarative, version-controlled YAML artifacts. Switching projects = swapping a blueprint.
+5. **Constraint manifolds.** Constrained decoding (Outlines / Guidance) masking tokens that would contradict canonical facts at generation time — for local-model paths that expose token-level control.
+6. **Durable execution.** Promotion, gateway adjudication, and cascade re-evaluation as replayable workflows (Temporal.io) so a crash mid-operation never leaves the ledger inconsistent.
+7. **Governance & HITL.** Cost-threshold human approval for expensive truth rewrites, and an evidence bundle (policy version, input context, decision record) for every truth-altering decision — so an auditor can reconstruct *why* any fact-version exists.
 
 Anything not listed under **Shipped** is design-in-flight; the code is the authoritative source for what exists today.
 

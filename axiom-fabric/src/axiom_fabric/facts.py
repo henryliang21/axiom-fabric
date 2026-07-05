@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
+from axiom_fabric.cost import mark_subtree_stale
 from axiom_fabric.models import (
     EDGE_KINDS,
     Fact,
@@ -159,21 +160,37 @@ def record_fact_version(
     justification: dict | None = None,
     temperature: float | None = None,
     note: str | None = None,
+    cascade_stale: bool = True,
 ) -> FactVersion:
     """Append a new FactVersion to `fact` and project edges from its justification.
 
     Raises ForwardReferenceError if any target_fv_id in `edges_to` does not
     already exist in the database. That single check is the only thing keeping
     the fact-version DAG acyclic.
+
+    When this appends a *later* version of an existing fact (v2+), the prior
+    version has just been superseded, so every fact-version derived from it is
+    cascade-marked stale in this same transaction (`cascade_stale=False` opts
+    out). A brand-new fact (v1) has no prior version and triggers no cascade.
     """
     if edge_kind not in EDGE_KINDS:
         raise ValueError(f"unknown edge_kind: {edge_kind!r}; expected one of {EDGE_KINDS}")
     _assert_targets_exist(session, edges_to)
 
+    new_version = _next_fact_version_number(session, fact)
+    prior_fv_id: uuid.UUID | None = None
+    if new_version > 1:
+        prior_fv_id = session.scalar(
+            select(FactVersion.id).where(
+                FactVersion.fact_id == fact.id,
+                FactVersion.version == new_version - 1,
+            )
+        )
+
     fv = FactVersion(
         fact_id=fact.id,
         layer_version_id=layer_version.id,
-        version=_next_fact_version_number(session, fact),
+        version=new_version,
         content=content,
         weight=weight,
         justification=justification,
@@ -190,6 +207,9 @@ def record_fact_version(
             )
         )
     session.flush()
+
+    if cascade_stale and prior_fv_id is not None:
+        mark_subtree_stale(session, prior_fv_id)
     return fv
 
 
@@ -218,6 +238,8 @@ def append_fact(
     weight: int,
     edges_to: Sequence[uuid.UUID] = (),
     edge_kind: str = "derived_from",
+    justification: dict | None = None,
+    temperature: float | None = None,
     note: str | None = None,
     schema_ref: str | None = None,
 ) -> FactVersion:
@@ -231,6 +253,8 @@ def append_fact(
                 weight=weight,
                 edges_to=edges_to,
                 edge_kind=edge_kind,
+                justification=justification,
+                temperature=temperature,
                 note=note,
                 schema_ref=schema_ref,
             )
@@ -247,6 +271,8 @@ def append_fact_version(
     weight: int,
     edges_to: Sequence[uuid.UUID] = (),
     edge_kind: str = "derived_from",
+    justification: dict | None = None,
+    temperature: float | None = None,
     note: str | None = None,
 ) -> FactVersion:
     """Append a new version to `fact`, wrapped in a fresh layer-version of the fact's layer."""
@@ -263,6 +289,8 @@ def append_fact_version(
                 weight=weight,
                 edges_to=edges_to,
                 edge_kind=edge_kind,
+                justification=justification,
+                temperature=temperature,
                 note=note,
             )
         ],

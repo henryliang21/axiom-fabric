@@ -20,8 +20,7 @@ frontends share, Alembic migrations, the `af` command-line interface, and the
 Codex CLI, …) read and write the ledger during execution.
 
 ```bash
-pip install axiom-fabric          # core + `af` CLI — SQLite built in, zero infrastructure
-pip install "axiom-fabric[mcp]"   # + the af-mcp MCP server for agents
+pip install axiom-fabric          # `af` CLI + `af-mcp` server (MCP built in) — SQLite, zero infrastructure
 pip install "axiom-fabric[llm]"   # + Anthropic / OpenAI extras
 
 af init                           # apply migrations -> clean store (`--demo` seeds example layers)

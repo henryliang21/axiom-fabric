@@ -11,8 +11,17 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from axiom_fabric.cost import ChangeCost
+from axiom_fabric.cost import is_stale as _is_stale
 from axiom_fabric.facts import RETRACTION_NOTE
-from axiom_fabric.models import Fact, FactVersion, FactVersionEdge, Layer, LayerVersion
+from axiom_fabric.models import (
+    Fact,
+    FactSource,
+    FactVersion,
+    FactVersionEdge,
+    Layer,
+    LayerVersion,
+)
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -65,6 +74,8 @@ def serialize_fact_version(fv: FactVersion) -> dict[str, Any]:
         "temperature": fv.temperature,
         "note": fv.note,
         "retracted": is_retracted(fv),
+        "stale": _is_stale(fv),
+        "stale_since": _iso(fv.stale_since),
         "created_at": _iso(fv.created_at),
     }
 
@@ -94,6 +105,43 @@ def serialize_edge(edge: FactVersionEdge) -> dict[str, Any]:
         "edge_kind": edge.edge_kind,
         "created_at": _iso(edge.created_at),
     }
+
+
+def serialize_source(source: FactSource) -> dict[str, Any]:
+    return {
+        "id": str(source.id),
+        "fact_id": str(source.fact_id),
+        "kind": source.kind,
+        "uri": source.uri,
+        "params": source.params,
+        "refresh_policy": source.refresh_policy,
+        "ttl_seconds": source.ttl_seconds,
+        "schedule_cron": source.schedule_cron,
+        "last_refreshed_at": _iso(source.last_refreshed_at),
+        "created_at": _iso(source.created_at),
+    }
+
+
+def serialize_change_cost(cost: ChangeCost, *, include_nodes: bool = True) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "root_fact_version_id": str(cost.root_fact_version_id),
+        "total": cost.total,
+        "descendant_count": cost.descendant_count,
+    }
+    if include_nodes:
+        out["nodes"] = [
+            {
+                "fact_version_id": str(n.fact_version_id),
+                "fact_id": str(n.fact_id),
+                "depth": n.depth,
+                "weight": n.weight,
+                "temperature": n.temperature,
+                "penalty": n.penalty,
+                "contribution": n.contribution,
+            }
+            for n in cost.nodes
+        ]
+    return out
 
 
 def parse_uuid(value: str, *, field: str) -> UUID:

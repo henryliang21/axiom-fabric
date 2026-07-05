@@ -25,7 +25,7 @@ guidance, update `agent_guide.md` first and mirror it here.
 ## Wiring the server (all agents)
 
 ```bash
-pipx install "axiom-fabric[mcp]"          # provides `af` and `af-mcp`
+pipx install axiom-fabric                 # provides `af` and `af-mcp` (MCP built in)
 af init                                    # clean store in this directory
 af-mcp install --client claude            # or: gemini | codex | claude-desktop
 #   add --allow-writes to let the agent create/update facts
